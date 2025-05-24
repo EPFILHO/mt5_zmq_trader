@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EPFilho"
 #property link      "epfilho73@gmail.com"
-#property version   "1.09"
+#property version   "1.10"
 #property strict
 
 #include <Zmq/Zmq.mqh> // https://github.com/dingmaotu/mql-zmq
@@ -18,8 +18,8 @@ input bool   InpDebugLog         = true;                   // Ativar logs
 
 //--- Variáveis globais
 Context context;
-Socket  admin_socket(context, ZMQ_DEALER);     // Socket único para comunicação administrativa (perguntas e respostas)
-Socket  data_socket(context, ZMQ_PUB);         // Data Socket
+Socket  admin_socket(context, ZMQ_DEALER);     // Socket para comunicação administrativa
+Socket  data_socket(context, ZMQ_DEALER);      // Socket para dados (GET_OHLC, GET_TICK, GET_INDICATOR_MA)
 Socket  trade_socket(context, ZMQ_SUB);        // Trade Socket
 Socket  live_socket(context, ZMQ_PUB);         // Live Socket
 Socket  stream_socket(context, ZMQ_PUB);       // Streaming Socket
@@ -1124,6 +1124,158 @@ void HandleTradeOrderCancelCommand(const string request_id, JSONNode &payload, S
 }
 
 //+------------------------------------------------------------------+
+//| Novo Comando GET_INDICATOR_MA - Média Móvel Simples (SMA)       |
+//+------------------------------------------------------------------+
+void HandleGetIndicatorMACommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   // Extrai os parâmetros do payload
+   string symbol = "";
+   JSONNode *symbol_node = payload["symbol"];
+   if(CheckPointer(symbol_node) != POINTER_INVALID)
+      symbol = symbol_node.ToString();
+
+   string timeframe = "";
+   JSONNode *tf_node = payload["timeframe"];
+   if(CheckPointer(tf_node) != POINTER_INVALID)
+      timeframe = tf_node.ToString();
+
+   int period = 0;
+   JSONNode *period_node = payload["period"];
+   if(CheckPointer(period_node) != POINTER_INVALID)
+      period = (int)period_node.ToInteger();
+
+   // Valida parâmetros
+   if(symbol == "" || period <= 0)
+   {
+      SendErrorResponse(request_id, "Parâmetros inválidos: symbol ou period", response_socket, socket_name);
+      return;
+   }
+
+   // Converte o timeframe para ENUM_TIMEFRAMES
+   ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+
+   // Cria o handle do indicador Média Móvel Simples (SMA)
+   int handle = iMA(symbol, tf, period, 0, MODE_SMA, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE)
+   {
+      SendErrorResponse(request_id, "Falha ao criar handle do indicador MA", response_socket, socket_name);
+      return;
+   }
+
+   // Copia o último valor da Média Móvel
+   double ma_values[];
+   int copied = CopyBuffer(handle, 0, 0, 1, ma_values);
+   IndicatorRelease(handle); // Libera o handle para evitar vazamento de memória
+
+   if(copied <= 0)
+   {
+      SendErrorResponse(request_id, "Falha ao obter valores do indicador MA", response_socket, socket_name);
+      return;
+   }
+
+   // Monta a resposta JSON
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   response["ma_value"] = ma_values[0];
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
+//| Novo Comando GET_OHLC - Último Candle OHLC                     |
+//+------------------------------------------------------------------+
+void HandleGetOHLCCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   // Extrai os parâmetros do payload
+   string symbol = "";
+   JSONNode *symbol_node = payload["symbol"];
+   if(CheckPointer(symbol_node) != POINTER_INVALID)
+      symbol = symbol_node.ToString();
+
+   string timeframe = "";
+   JSONNode *tf_node = payload["timeframe"];
+   if(CheckPointer(tf_node) != POINTER_INVALID)
+      timeframe = tf_node.ToString();
+
+   // Valida parâmetros
+   if(symbol == "")
+   {
+      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      return;
+   }
+
+   // Converte o timeframe para ENUM_TIMEFRAMES
+   ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+
+   // Copia o último candle
+   MqlRates rates[];
+   int copied = CopyRates(symbol, tf, 0, 1, rates);
+   if(copied <= 0)
+   {
+      SendErrorResponse(request_id, "Falha ao obter dados OHLC", response_socket, socket_name);
+      return;
+   }
+
+   // Monta a resposta JSON
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   JSONNode ohlc;
+   ohlc["time"] = (long)rates[0].time;
+   ohlc["open"] = rates[0].open;
+   ohlc["high"] = rates[0].high;
+   ohlc["low"] = rates[0].low;
+   ohlc["close"] = rates[0].close;
+   ohlc["volume"] = (long)rates[0].tick_volume;
+   response["ohlc"] = ohlc;
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
+//| Novo Comando GET_TICK - Último Tick Bid/Ask                    |
+//+------------------------------------------------------------------+
+void HandleGetTickCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   // Extrai os parâmetros do payload
+   string symbol = "";
+   JSONNode *symbol_node = payload["symbol"];
+   if(CheckPointer(symbol_node) != POINTER_INVALID)
+      symbol = symbol_node.ToString();
+
+   // Valida parâmetros
+   if(symbol == "")
+   {
+      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      return;
+   }
+
+   // Obtém o último tick
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick))
+   {
+      SendErrorResponse(request_id, "Falha ao obter dados de tick", response_socket, socket_name);
+      return;
+   }
+
+   // Monta a resposta JSON
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   JSONNode tick_data;
+   tick_data["time"] = (long)tick.time;
+   tick_data["bid"] = tick.bid;
+   tick_data["ask"] = tick.ask;
+   tick_data["volume"] = (long)tick.volume;
+   response["tick"] = tick_data;
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
 //| Inicialização do EA                                             |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -1151,13 +1303,15 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   // Bind Data, Trade, Live, Streaming Sockets
+   // Bind Data Socket (ZMQ_DEALER)
+   data_socket.setIdentity(g_brokerKey); // Define identidade única para o socket DEALER
    if(!data_socket.bind(StringFormat("tcp://*:%d", g_dataPort)))
    {
       PrintFormat("ZmqTraderBridge: Erro ao bind Data Socket %d. GetLastError(): %d", g_dataPort, GetLastError());
       return(INIT_FAILED);
    }
 
+   // Bind Trade, Live, Streaming Sockets
    if(!trade_socket.bind(StringFormat("tcp://*:%d", g_tradePort)))
    {
       PrintFormat("ZmqTraderBridge: Erro ao bind Trade Socket %d. GetLastError(): %d", g_tradePort, GetLastError());
@@ -1226,6 +1380,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void CheckIncomingCommands()
 {
+   // Receber mensagens do Admin Socket
    ZmqMsg msg_admin;
    while(admin_socket.recv(msg_admin, ZMQ_DONTWAIT))
    {
@@ -1238,6 +1393,20 @@ void CheckIncomingCommands()
          Print("ZMQ Bridge ERROR (Admin): Falha ao deserializar JSON: ", message_str);
    }
 
+   // Receber mensagens do Data Socket
+   ZmqMsg msg_data;
+   while(data_socket.recv(msg_data, ZMQ_DONTWAIT))
+   {
+      string message_str = msg_data.getData();
+      if(InpDebugLog) PrintFormat("ZMQ Bridge RX (Data): %s", message_str);
+      JSONNode json_parser;
+      if(json_parser.Deserialize(message_str))
+         ProcessCommand(json_parser, data_socket, "Data");
+      else
+         Print("ZMQ Bridge ERROR (Data): Falha ao deserializar JSON: ", message_str);
+   }
+
+   // Receber mensagens do Trade Socket
    ZmqMsg msg_trade;
    while(trade_socket.recv(msg_trade, ZMQ_DONTWAIT))
    {
@@ -1324,6 +1493,12 @@ void ProcessCommand(JSONNode &json_command, Socket &response_socket, string sock
       HandleTradeOrderModifyCommand(request_id, payload, response_socket, socket_name);
    else if(command == "TRADE_ORDER_CANCEL")
       HandleTradeOrderCancelCommand(request_id, payload, response_socket, socket_name);
+   else if(command == "GET_INDICATOR_MA") // Novo comando para Média Móvel
+      HandleGetIndicatorMACommand(request_id, payload, response_socket, socket_name);
+   else if(command == "GET_OHLC") // Novo comando para OHLC
+      HandleGetOHLCCommand(request_id, payload, response_socket, socket_name);
+   else if(command == "GET_TICK") // Novo comando para Tick
+      HandleGetTickCommand(request_id, payload, response_socket, socket_name);
    else
       SendErrorResponse(request_id, "Comando desconhecido: " + command, response_socket, socket_name);
 }
@@ -1416,11 +1591,17 @@ ENUM_TIMEFRAMES StringToTimeframe(string tf)
 }
 
 //+------------------------------------------------------------------+
-//| ZmqTraderBridge.mq5 - Versão 1.0.9 - GROK                             |
-//| - admin_socket (15555, ZMQ_DEALER): Recebe comandos e envia respostas administrativas |
-//| - data_socket (15556, ZMQ_PUB): Envia dados                     |
-//| - trade_socket (15559, ZMQ_SUB): Recebe comandos de trade       |
-//| - live_socket (15557, ZMQ_PUB): Envia respostas de trade        |
-//| - stream_socket (15558, ZMQ_PUB): Envia eventos de OnTradeTransaction |
+//| ZmqTraderBridge.mq5 - Versão 1.0.9.e - GROK                     |
+//| - admin_socket (15560, ZMQ_DEALER): Recebe comandos e envia respostas administrativas (PING, POSITIONS, etc.) |
+//| - data_socket (15561, ZMQ_DEALER): Recebe comandos e envia respostas de dados (GET_OHLC, GET_TICK, GET_INDICATOR_MA) |
+//| - trade_socket (15564, ZMQ_SUB): Recebe comandos de trade       |
+//| - live_socket (15562, ZMQ_PUB): Envia respostas de trade        |
+//| - stream_socket (15563, ZMQ_PUB): Envia eventos de OnTradeTransaction |
 //| Configure portas únicas por instância em MQL5/Files/config.ini  |
+//| Alterações (Envio 7):                                          |
+//| - Alterado data_socket de ZMQ_PUB para ZMQ_DEALER para suportar recebimento de comandos |
+//| - Adicionado setIdentity para data_socket                      |
+//| - Adicionado recebimento de mensagens em data_socket em CheckIncomingCommands() |
+//| - Adicionados logs para mensagens recebidas na DataPort        |
+//| - Mantidas todas as funcionalidades de AdminPort, TradePort, LivePort e StreamPort |
 //+------------------------------------------------------------------+
