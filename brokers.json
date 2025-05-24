@@ -1,0 +1,17 @@
+{
+    "EXAMPLE-12345": {
+        "name": "EP Filho",
+        "client": "EP Filho",
+        "broker_name": "EXAMPLE",
+        "login": "12345",
+        "password": "xxxxxx",
+        "server": "XYZ-Server",
+        "type": "Demo",
+        "mode": "Hedge",
+        "admin_port": 15555,
+        "data_port": 15556,
+        "trade_port": 15559,
+        "live_port": 15557,
+        "stream_port": 15558
+    }
+}
