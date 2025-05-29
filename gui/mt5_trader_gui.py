@@ -1,14 +1,19 @@
 # gui/mt5_trader_gui.py
-# Versão 1.0.9.e - Envio 3
+# Versão 1.0.9.g - Correção Final
 # Ajustes:
-# - Modificado send_data_command para usar send_command_to_broker com use_data_port=True, removendo port_type.
-# - Mantidas todas as correções do Envio 1 (1.0.9.e):
-#   - Validações para GET_INDICATOR_MA, GET_OHLC, GET_TICK.
-#   - Sinais indicator_ma_received, ohlc_received, tick_received.
-# - Mantidas todas as funcionalidades do envio 7 (1.0.9.a):
-#   - Aba "Indicadores" com campos e botões.
-#   - Funcionalidades de Copy Trade, HISTORY_DATA, TRADE_*, etc.
-# - Versão alinhada com ZmqTraderBridge 1.0.9.e e ZmqRouter 1.0.9.a (envio 5).
+# - Código reorganizado em 9 blocos modulares para melhor organização e manutenção.
+# - Correção do erro no streaming (request_id inconsistente entre START_STREAM_OHLC_INDICATORS e STOP_STREAM_OHLC_INDICATORS).
+# - Adicionado controle de estado para desabilitar/habilitar os botões START_STREAM_OHLC_INDICATORS e STOP_STREAM_OHLC_INDICATORS.
+# - Mantidas todas as funcionalidades das versões anteriores (1.0.9.f e 1.0.9.g):
+#   - Interface com abas Administrativo, Trading, Indicadores.
+#   - Suporte a comandos single-shot (GET_INDICATOR_MA, GET_OHLC, GET_TICK).
+#   - Suporte a streaming (START/STOP_STREAM_OHLC_INDICATORS).
+#   - Copy Trade, validações, sinais e logs.
+# - Alinhado com ZmqTraderBridge 1.11 e ZmqRouter 1.0.9.b.
+
+# Bloco 1 - Importações e Configuração Inicial
+# Objetivo: Importar bibliotecas necessárias e configurar o logging para depuração e monitoramento.
+# Este bloco define as dependências do sistema e o formato de logs para rastrear eventos e erros.
 
 import sys
 import json
@@ -18,10 +23,12 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QTextEdit, QTabWidget, QFormLayout,
-    QLineEdit, QCheckBox, QLabel, QGridLayout
+    QLineEdit, QCheckBox, QLabel, QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PySide6.QtCore import Slot
 
+# Configuração de logging para registrar eventos e erros em detalhes.
+# Formato inclui timestamp, nível de log (DEBUG, INFO, ERROR) e mensagem.
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -29,8 +36,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Bloco 2 - Inicialização da Classe e Estrutura Geral
+# Objetivo: Definir a classe MT5TraderGui, inicializar atributos e chamar métodos de setup.
+# Este bloco serve como ponto de entrada para a interface gráfica, armazenando referências a configurações,
+# gerenciadores de corretoras, roteadores ZMQ e a janela principal.
+# Ajuste (versão 1.0.9.g - Suporte a múltiplas corretoras):
+# - Alterado self.stream_ohlc_indicators_request_id para um dicionário que armazena request_id por corretora.
+# - Adicionado dicionário para rastrear estado de streaming ativo por corretora.
+
 class MT5TraderGui(QDialog):
     def __init__(self, config, broker_manager, zmq_router, zmq_message_handler, main_window, parent=None):
+        """
+        Inicializa a interface gráfica MT5TraderGui.
+
+        Args:
+            config: Configurações da aplicação.
+            broker_manager: Gerenciador de corretoras conectadas.
+            zmq_router: Objeto para roteamento de mensagens ZMQ ao EA.
+            zmq_message_handler: Manipulador de mensagens recebidas via ZMQ.
+            main_window: Referência à janela principal para atualização de status.
+            parent: Widget pai (opcional, padrão None).
+        """
         super().__init__(parent)
         self.config = config
         self.broker_manager = broker_manager
@@ -38,39 +64,61 @@ class MT5TraderGui(QDialog):
         self.zmq_message_handler = zmq_message_handler
         self.main_window = main_window
         self.copy_trade_enabled = False
+        # Dicionário para armazenar o request_id do último START_STREAM_OHLC_INDICATORS por corretora.
+        # Usado para garantir que o STOP_STREAM_OHLC_INDICATORS reutilize o mesmo request_id da corretora correspondente.
+        self.stream_ohlc_indicators_request_ids = {}
+        # Dicionário para rastrear se o streaming está ativo para cada corretora.
+        self.streaming_active_by_broker = {}
         self.setWindowTitle("MT5Trader GUI")
-        self.setGeometry(100, 100, 600, 450)
-        self.setMinimumWidth(600)
+        self.setGeometry(100, 100, 800, 600)  # Aumentado para acomodar a tabela
+        self.setMinimumWidth(800)
         self.setup_ui()
         self._connect_signals()
         self._populate_brokers()
         self._update_buttons()
         logger.info("MT5TraderGui inicializado.")
 
+    # Bloco 3 - Configuração da Interface Gráfica (UI Setup)
+    # Objetivo: Definir o layout da interface gráfica, widgets (botões, campos de texto, abas, tabelas) e
+    # organizar a estrutura visual da GUI.
+    # Este bloco cria as abas Administrativo, Trading e Indicadores, além de campos de entrada e botões para
+    # interação com o usuário.
+
     def setup_ui(self):
+        """
+        Configura a interface gráfica da aplicação, incluindo layout, abas e widgets.
+        Cria as seções para seleção de corretora, abas de funcionalidades (Administrativo, Trading, Indicadores)
+        e área de log.
+        """
         layout = QVBoxLayout(self)
 
+        # Widget para seleção de corretora.
         self.broker_combo = QComboBox()
         layout.addWidget(QLabel("Selecione a Corretora:"))
         layout.addWidget(self.broker_combo)
 
+        # Checkbox para ativar/desativar funcionalidade de Copy Trade.
         self.copy_trade_checkbox = QCheckBox("Ativar Copy Trade (replicar ordens para outra conta)")
         self.copy_trade_checkbox.stateChanged.connect(self.toggle_copy_trade)
         layout.addWidget(self.copy_trade_checkbox)
 
+        # Botão para parar monitoramento (inicialmente desativado).
         self.monitor_btn = QPushButton("Parar Monitoramento")
         self.monitor_btn.setMaximumWidth(150)
         self.monitor_btn.setStyleSheet("padding: 5px;")
         self.monitor_btn.setEnabled(False)
         layout.addWidget(self.monitor_btn)
 
+        # Widget de abas para organizar funcionalidades por categoria.
         tabs = QTabWidget()
         layout.addWidget(tabs)
 
+        # Aba Administrativo: Comandos de informações gerais e histórico.
         admin_tab = QWidget()
         admin_layout = QVBoxLayout(admin_tab)
         admin_buttons_layout = QGridLayout()
 
+        # Lista de comandos administrativos disponíveis.
         admin_commands = [
             "PING", "GET_STATUS_INFO", "GET_BROKER_INFO", "GET_BROKER_SERVER",
             "GET_BROKER_PATH", "GET_ACCOUNT_INFO", "GET_ACCOUNT_BALANCE",
@@ -88,6 +136,7 @@ class MT5TraderGui(QDialog):
             col = i % 3
             admin_buttons_layout.addWidget(btn, row, col)
 
+        # Campos para configuração do comando HISTORY_DATA.
         history_data_layout = QFormLayout()
         self.history_data_symbol = QLineEdit("BTCUSD")
         self.history_data_symbol.setMaximumWidth(100)
@@ -107,6 +156,7 @@ class MT5TraderGui(QDialog):
         self.history_data_btn.clicked.connect(lambda: self.send_admin_command("HISTORY_DATA"))
         history_data_layout.addRow("", self.history_data_btn)
 
+        # Campos para configuração do comando HISTORY_TRADES.
         history_trades_layout = QFormLayout()
         self.history_trades_start = QLineEdit(str(int(time.time()) - 86400))
         self.history_trades_start.setMaximumWidth(100)
@@ -125,6 +175,7 @@ class MT5TraderGui(QDialog):
         admin_layout.addLayout(history_trades_layout)
         tabs.addTab(admin_tab, "Administrativo")
 
+        # Aba Trading: Comandos para operações de mercado (compra, venda, modificação de posições).
         trade_tab = QWidget()
         trade_layout = QVBoxLayout(trade_tab)
         trade_form_layout = QFormLayout()
@@ -208,10 +259,49 @@ class MT5TraderGui(QDialog):
         trade_layout.addLayout(modify_buttons_layout)
         tabs.addTab(trade_tab, "Trading")
 
+        # Aba Indicadores: Comandos para indicadores e streaming de dados.
         indicators_tab = QWidget()
         indicators_layout = QVBoxLayout(indicators_tab)
-        indicators_form_layout = QFormLayout()
 
+        # Tabela para configurar múltiplos ativos e indicadores para streaming.
+        indicators_layout.addWidget(QLabel("Configuração de Streaming OHLC + Indicadores:"))
+        self.stream_table = QTableWidget()
+        self.stream_table.setColumnCount(3)
+        self.stream_table.setHorizontalHeaderLabels(["Símbolo", "Timeframe", "Indicadores (ex: MA,9;MA,21)"])
+        self.stream_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.stream_table.setRowCount(1)  # Começa com uma linha vazia
+        indicators_layout.addWidget(self.stream_table)
+
+        # Botões para adicionar e remover linhas da tabela de streaming.
+        table_row_buttons_layout = QHBoxLayout()
+        add_row_btn = QPushButton("Adicionar Ativo")
+        add_row_btn.clicked.connect(self.add_stream_row)
+        remove_row_btn = QPushButton("Remover Ativo")
+        remove_row_btn.clicked.connect(self.remove_stream_row)
+        table_row_buttons_layout.addWidget(add_row_btn)
+        table_row_buttons_layout.addWidget(remove_row_btn)
+        indicators_layout.addLayout(table_row_buttons_layout)
+
+        # Botões para iniciar/parar o streaming encapsulado de OHLC e indicadores.
+        stream_control_buttons_layout = QHBoxLayout()
+        self.start_stream_indicators_btn = QPushButton("START_STREAM_OHLC_INDICATORS")
+        self.start_stream_indicators_btn.setMaximumWidth(250)
+        self.start_stream_indicators_btn.setStyleSheet("padding: 5px;")
+        self.start_stream_indicators_btn.clicked.connect(
+            lambda: self.send_admin_command("START_STREAM_OHLC_INDICATORS"))
+        stream_control_buttons_layout.addWidget(self.start_stream_indicators_btn)
+
+        self.stop_stream_indicators_btn = QPushButton("STOP_STREAM_OHLC_INDICATORS")
+        self.stop_stream_indicators_btn.setMaximumWidth(250)
+        self.stop_stream_indicators_btn.setStyleSheet("padding: 5px;")
+        self.stop_stream_indicators_btn.clicked.connect(
+            lambda: self.send_admin_command("STOP_STREAM_OHLC_INDICATORS"))
+        stream_control_buttons_layout.addWidget(self.stop_stream_indicators_btn)
+        indicators_layout.addLayout(stream_control_buttons_layout)
+
+        # Seção para comandos single-shot de indicadores (GET_INDICATOR_MA, GET_OHLC, GET_TICK).
+        indicators_layout.addWidget(QLabel("\nComandos de Indicadores (Single-Shot):"))
+        indicators_form_layout = QFormLayout()
         self.indicator_symbol = QLineEdit("EURUSD")
         self.indicator_timeframe = QLineEdit("H1")
         self.indicator_period = QLineEdit("20")
@@ -221,8 +311,10 @@ class MT5TraderGui(QDialog):
         indicators_form_layout.addRow("Símbolo:", self.indicator_symbol)
         indicators_form_layout.addRow("Timeframe:", self.indicator_timeframe)
         indicators_form_layout.addRow("Período (MA):", self.indicator_period)
+        indicators_layout.addLayout(indicators_form_layout)
 
-        indicators_buttons_layout = QHBoxLayout()
+        # Botões para comandos single-shot de indicadores.
+        single_shot_buttons_layout = QHBoxLayout()
         indicator_commands = ["GET_INDICATOR_MA", "GET_OHLC", "GET_TICK"]
         self.indicator_buttons = {}
         for cmd in indicator_commands:
@@ -231,25 +323,37 @@ class MT5TraderGui(QDialog):
             btn.setStyleSheet("padding: 5px;")
             btn.clicked.connect(lambda checked, c=cmd: self.send_admin_command(c))
             self.indicator_buttons[cmd] = btn
-            indicators_buttons_layout.addWidget(btn)
+            single_shot_buttons_layout.addWidget(btn)
+        indicators_layout.addLayout(single_shot_buttons_layout)
 
-        indicators_layout.addLayout(indicators_form_layout)
-        indicators_layout.addLayout(indicators_buttons_layout)
-        tabs.addTab(indicators_tab, "Indicadores")
+        tabs.addTab(indicators_tab, "Indicadores")  # Adiciona a aba Indicadores ao final
 
+        # Área de log para exibir mensagens, respostas e erros.
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setMinimumHeight(300)
         layout.addWidget(QLabel("Log de Comandos e Respostas:"))
         layout.addWidget(self.log_area)
 
+        # Botão para fechar a interface.
         stop_btn = QPushButton("Fechar")
         stop_btn.setMaximumWidth(150)
         stop_btn.setStyleSheet("padding: 5px;")
         stop_btn.clicked.connect(self.close)
         layout.addWidget(stop_btn)
 
+    # Bloco 4 - Conexões de Sinais e Atualizações de Interface
+    # Objetivo: Definir conexões de sinais (eventos) e métodos para atualização da interface.
+    # Este bloco lida com a interação entre eventos (sinais do Qt), atualização de widgets e exibição de
+    # dados recebidos do EA (posições, ordens, indicadores, etc.) na área de log.
+    # Ajuste (versão 1.0.9.g - Correção AttributeError):
+    # - Alterado para usar self.streaming_active_by_broker em vez de self.streaming_active no método _update_buttons.
+
     def _connect_signals(self):
+        """
+        Conecta sinais do Qt para eventos de interface e sinais personalizados para
+        atualização de dados recebidos do EA.
+        """
         self.broker_combo.currentIndexChanged.connect(self._update_buttons)
         self.zmq_message_handler.log_message_received.connect(self.update_log)
         self.main_window.broker_status_updated.connect(self._update_buttons)
@@ -262,9 +366,13 @@ class MT5TraderGui(QDialog):
         self.zmq_message_handler.indicator_ma_received.connect(self._update_indicator_ma)
         self.zmq_message_handler.ohlc_received.connect(self._update_ohlc)
         self.zmq_message_handler.tick_received.connect(self._update_tick)
+        self.zmq_message_handler.stream_ohlc_received.connect(self._update_stream_ohlc)
+        self.zmq_message_handler.stream_ohlc_indicators_received.connect(
+            self._update_stream_ohlc_indicators)  # Conexão para o novo sinal de streaming encapsulado
         logger.debug("Sinais conectados no MT5TraderGui.")
 
     def _populate_brokers(self):
+        """Popula o combo box de corretoras com as corretoras conectadas disponíveis."""
         self.broker_combo.clear()
         connected_brokers = self.broker_manager.get_connected_brokers()
         for key in sorted(connected_brokers):
@@ -275,6 +383,12 @@ class MT5TraderGui(QDialog):
 
     @Slot(str)
     def _select_broker(self, broker_key: str):
+        """
+        Seleciona automaticamente uma corretora no combo box quando conectada.
+
+        Args:
+            broker_key: Chave da corretora a ser selecionada.
+        """
         index = self.broker_combo.findText(broker_key)
         if index >= 0:
             self.broker_combo.setCurrentIndex(index)
@@ -283,6 +397,7 @@ class MT5TraderGui(QDialog):
             logger.debug(f"Corretora {broker_key} não encontrada na QComboBox.")
 
     def _update_buttons(self):
+        """Atualiza o estado (habilitado/desabilitado) dos botões com base na corretora selecionada e seu status."""
         selected_key = self.broker_combo.currentText()
         is_registered = bool(
             selected_key and selected_key in self.main_window.broker_status and self.main_window.broker_status[
@@ -298,21 +413,255 @@ class MT5TraderGui(QDialog):
         for btn in self.modify_buttons.values():
             btn.setEnabled(is_registered)
 
+        # Habilita/desabilita botões de indicadores single-shot.
         for btn in self.indicator_buttons.values():
             btn.setEnabled(is_registered)
+
+        # Habilita/desabilita botões de streaming encapsulado com base no status da corretora.
+        # Verifica se o streaming está ativo para a corretora selecionada.
+        streaming_active = selected_key in self.streaming_active_by_broker and self.streaming_active_by_broker[
+            selected_key]
+        if is_registered and not streaming_active:
+            self.start_stream_indicators_btn.setEnabled(True)
+        elif not is_registered or streaming_active:
+            self.start_stream_indicators_btn.setEnabled(False)
+        self.stop_stream_indicators_btn.setEnabled(is_registered)
 
         logger.debug(f"Botões atualizados para corretora {selected_key}. Registrada: {is_registered}.")
 
     def toggle_copy_trade(self, state):
+        """
+        Ativa ou desativa a funcionalidade de Copy Trade com base no estado do checkbox.
+
+        Args:
+            state: Estado do checkbox (2 para ativado, 0 para desativado).
+        """
         self.copy_trade_enabled = state == 2
         log_msg = f"Copy Trade {'ativado' if self.copy_trade_enabled else 'desativado'}"
         logger.info(log_msg)
         self.update_log(log_msg)
 
-    async def send_command(self, broker_key, command, payload, command_type='admin'):
+    @Slot(str)
+    def update_log(self, message):
+        """
+        Atualiza a área de log da interface com uma nova mensagem.
+        Limita o número de linhas a 1000 para evitar sobrecarga.
+
+        Args:
+            message: Mensagem a ser exibida no log.
+        """
+        if "TICK" not in message:
+            self.log_area.append(message)
+            lines = self.log_area.toPlainText().split('\n')
+            if len(lines) > 1000:
+                self.log_area.setText('\n'.join(lines[-1000:]))
+
+    @Slot(dict)
+    def _update_positions(self, positions):
+        """
+        Atualiza a área de log com dados de posições recebidas do EA.
+
+        Args:
+            positions: Dicionário com dados de posições.
+        """
+        text = f"Posições: {json.dumps(positions, indent=2)}"
+        self.log_area.append(text)
+        logger.debug(f"Posições atualizadas: {text}")
+
+    @Slot(dict)
+    def _update_orders(self, orders):
+        """
+        Atualiza a área de log com dados de ordens recebidas do EA.
+
+        Args:
+            orders: Dicionário com dados de ordens.
+        """
+        text = f"Ordens: {json.dumps(orders, indent=2)}"
+        self.log_area.append(text)
+        logger.debug(f"Ordens atualizadas: {text}")
+
+    @Slot(dict)
+    def _update_history_data(self, history_data):
+        """
+        Atualiza a área de log com dados históricos de candles recebidos do EA.
+
+        Args:
+            history_data: Dicionário com dados históricos.
+        """
+        text = f"Histórico de Dados: {json.dumps(history_data, indent=2)}"
+        self.log_area.append(text)
+        logger.debug(f"Histórico de dados atualizado: {text}")
+
+    @Slot(dict)
+    def _update_history_trades(self, history_trades):
+        """
+        Atualiza a área de log com histórico de trades recebidos do EA.
+
+        Args:
+            history_trades: Dicionário com histórico de trades.
+        """
+        text = f"Histórico de Trades: {json.dumps(history_trades, indent=2)}"
+        self.log_area.append(text)
+        logger.debug(f"Histórico de trades atualizado: {text}")
+
+    @Slot(dict)
+    def _update_trade_response(self, trade_response):
+        """
+        Atualiza a área de log com resposta de um comando de trading.
+
+        Args:
+            trade_response: Dicionário com resposta do comando de trading.
+        """
+        status = "✅ Sucesso" if trade_response.get(
+            'status') == 'OK' else f"❌ Erro: {trade_response.get('error_message', 'Desconhecido')}"
+        text = (
+            f"Resposta de Trading ({trade_response.get('broker_key')}): "
+            f"{json.dumps(trade_response, indent=2)}\nStatus: {status}"
+        )
+        self.log_area.append(text)
+        logger.debug(f"Resposta de trading atualizada: {text}")
+
+    @Slot(dict)
+    def _update_indicator_ma(self, data):
+        """
+        Atualiza a área de log com dados de média móvel recebidos.
+
+        Args:
+            data: Dicionário com dados de média móvel.
+        """
+        status = "✅ Sucesso" if 'ma_value' in data else "❌ Erro"
+        text = f"Média Móvel ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
+        self.log_area.append(text)
+        logger.debug(f"Média Móvel atualizada: {text}")
+
+    @Slot(dict)
+    def _update_ohlc(self, data):
+        """
+        Atualiza a área de log com dados OHLC recebidos.
+
+        Args:
+            data: Dicionário com dados OHLC.
+        """
+        status = "✅ Sucesso" if 'ohlc' in data and data['ohlc'] else "❌ Erro"
+        text = f"OHLC ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
+        self.log_area.append(text)
+        logger.debug(f"OHLC atualizado: {text}")
+
+    @Slot(dict)
+    def _update_tick(self, data):
+        """
+        Atualiza a área de log com dados de tick recebidos.
+
+        Args:
+            data: Dicionário com dados de tick.
+        """
+        status = "✅ Sucesso" if 'tick' in data and data['tick'] else "❌ Erro"
+        text = f"Tick ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
+        self.log_area.append(text)
+        logger.debug(f"Tick atualizado: {text}")
+
+    @Slot(dict)
+    def _update_stream_ohlc(self, data):
+        """
+        Atualiza a área de log com dados de streaming OHLC recebidos.
+
+        Args:
+            data: Dicionário com dados de streaming OHLC.
+        """
+        status = "✅ Sucesso" if data.get("status") == "OK" or 'ohlc' in data else "❌ Erro"
+        text = f"Stream OHLC ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
+        self.log_area.append(text)
+        logger.debug(f"Stream OHLC atualizado: {text}")
+
+    @Slot(dict)
+    def _update_stream_ohlc_indicators(self, data):
+        """
+        Atualiza a área de log com dados de streaming OHLC + Indicadores.
+        Formata as informações de cada ativo (OHLC e indicadores) em linhas legíveis.
+
+        Args:
+            data: Dicionário com dados de streaming, contendo uma lista de entradas por ativo.
+        """
+        broker_key = data.get("broker_key", "N/A")
+        entries = data.get("data", [])
+
+        if not entries:
+            self.log_area.append(f"Stream OHLC+Indicadores ({broker_key}): Nenhuma atualização de dados.")
+            logger.debug(f"Stream OHLC+Indicadores ({broker_key}): Nenhuma atualização de dados.")
+            return
+
+        for entry in entries:
+            symbol = entry.get("symbol", "N/A")
+            timeframe = entry.get("timeframe", "N/A")
+            ohlc = entry.get("ohlc", {})
+            indicators = entry.get("indicators", [])
+
+            ohlc_str = f"O:{ohlc.get('open', 0)} H:{ohlc.get('high', 0)} L:{ohlc.get('low', 0)} C:{ohlc.get('close', 0)}"
+
+            indicators_str_list = []
+            for ind in indicators:
+                ind_type = ind.get('type', 'N/A')
+                ind_period = ind.get('period', 'N/A')
+                ind_value = ind.get('value', 'N/A')
+                indicators_str_list.append(f"{ind_type}({ind_period}):{ind_value}")
+
+            indicators_str = ", ".join(indicators_str_list)
+
+            log_message = (
+                f"Stream OHLC+Indicadores ({broker_key}) - {symbol} {timeframe}: "
+                f"OHLC=[{ohlc_str}] | Indicadores=[{indicators_str}]"
+            )
+            self.log_area.append(log_message)
+            logger.debug(f"Stream OHLC+Indicadores detalhe: {log_message}")
+
+    # Bloco 5 - Gerenciamento de Tabela de Streaming
+    # Objetivo: Definir métodos para gerenciar a tabela de configuração de streaming na aba Indicadores.
+    # Este bloco permite adicionar e remover linhas na tabela usada para configurar múltiplos ativos e
+    # indicadores para streaming.
+
+    def add_stream_row(self):
+        """
+        Adiciona uma nova linha à tabela de configuração de streaming.
+        Preenche a linha com valores padrão para facilitar a edição pelo usuário.
+        """
+        row = self.stream_table.rowCount()
+        self.stream_table.insertRow(row)
+        # Opcional: preencher com valores padrão para facilitar
+        self.stream_table.setItem(row, 0, QTableWidgetItem("EURUSD"))
+        self.stream_table.setItem(row, 1, QTableWidgetItem("M1"))
+        self.stream_table.setItem(row, 2, QTableWidgetItem("MA,9;MA,21"))
+
+    def remove_stream_row(self):
+        """
+        Remove a linha selecionada da tabela de configuração de streaming.
+        Exibe uma mensagem de erro se nenhuma linha estiver selecionada.
+        """
+        row = self.stream_table.currentRow()
+        if row >= 0:
+            self.stream_table.removeRow(row)
+        else:
+            self.update_log("Selecione uma linha para remover.")
+
+    # Bloco 6 - Comunicação com o EA (Funções Genéricas de Envio)
+    # Objetivo: Definir métodos genéricos para envio de comandos ao EA via ZMQ.
+    # Este bloco contém as funções base de comunicação usadas pelos métodos específicos de cada aba
+    # (Administrativo, Trading, Indicadores). Lida com envio, tratamento de respostas e erros.
+
+    async def send_command(self, broker_key, command, payload, command_type='admin', use_data_port=False):
+        """
+        Envia um comando genérico para o EA associado à corretora especificada.
+        Usado para comandos administrativos e de trading.
+
+        Args:
+            broker_key: Chave da corretora para qual o comando será enviado.
+            command: Nome do comando a ser executado (ex.: PING, TRADE_ORDER_TYPE_BUY).
+            payload: Dicionário com os parâmetros do comando.
+            command_type: Tipo de comando (admin ou trade, para fins de logging).
+            use_data_port: Se True, usa a porta de dados para envio (usado para streaming e indicadores).
+        """
         request_id = f"{command.lower()}_{broker_key}_{int(time.time())}"
         try:
-            response = await self.zmq_router.send_command_to_broker(broker_key, command, payload, request_id)
+            response = await self.zmq_router.send_command_to_broker(broker_key, command, payload, request_id, use_data_port=use_data_port)
             if isinstance(response, dict):
                 if response.get("status") == "ERROR":
                     log_msg = f"Erro: {response.get('message', 'Falha desconhecida')}"
@@ -334,32 +683,26 @@ class MT5TraderGui(QDialog):
             logger.error(f"Exceção ao enviar {command} para {broker_key}: {str(e)}")
 
     async def send_data_command(self, broker_key, command, payload):
-        request_id = f"{command.lower()}_{broker_key}_{int(time.time())}"
-        try:
-            response = await self.zmq_router.send_command_to_broker(
-                broker_key, command, payload, request_id, use_data_port=True
-            )
-            if isinstance(response, dict):
-                if response.get("status") == "ERROR":
-                    log_msg = f"Erro: {response.get('message', 'Falha desconhecida')}"
-                    self.update_log(log_msg)
-                    logger.error(f"Falha ao enviar {command} para {broker_key} via DataPort: {response.get('message')}")
-                else:
-                    logger.info(f"Comando {command} enviado para {broker_key} via DataPort: {response}")
-            else:
-                log_msg = f"Erro: Resposta inválida para {command} via DataPort."
-                self.update_log(log_msg)
-                logger.error(f"Resposta inválida para {command} de {broker_key} via DataPort: {response}")
-        except asyncio.TimeoutError:
-            log_msg = f"Erro: Timeout ao aguardar resposta para {command} via DataPort."
-            self.update_log(log_msg)
-            logger.error(f"Timeout ao enviar {command} para {broker_key} via DataPort")
-        except Exception as e:
-            log_msg = f"Erro ao enviar comando via DataPort: {str(e)}"
-            self.update_log(log_msg)
-            logger.error(f"Exceção ao enviar {command} para {broker_key} via DataPort: {str(e)}")
+        """
+        Envia um comando usando a porta de dados (DataPort) para o EA associado à corretora.
+        Usado para comandos relacionados a indicadores e streaming.
+
+        Args:
+            broker_key: Chave da corretora para qual o comando será enviado.
+            command: Nome do comando a ser executado (ex.: GET_INDICATOR_MA, START_STREAM_OHLC_INDICATORS).
+            payload: Dicionário com os parâmetros do comando.
+        """
+        return await self.send_command(broker_key, command, payload, command_type='data', use_data_port=True)
 
     async def send_copy_trade(self, primary_broker, command, message):
+        """
+        Replica um comando de trading para outras corretoras conectadas, se Copy Trade estiver ativado.
+
+        Args:
+            primary_broker: Chave da corretora primária que originou o comando.
+            command: Nome do comando de trading a ser replicado.
+            message: Dicionário com dados do comando original (broker_key, payload, request_id).
+        """
         connected_brokers = self.broker_manager.get_connected_brokers()
         for broker_key in connected_brokers:
             if broker_key != primary_broker and broker_key in self.main_window.broker_status and \
@@ -371,7 +714,22 @@ class MT5TraderGui(QDialog):
                                                              copied_msg["request_id"])
                 logger.info(f"Copy Trade: Enviado {command} para {broker_key}")
 
+    # Bloco 7 - Comandos Administrativos (Aba Administrativo)
+    # Objetivo: Definir a lógica para envio de comandos administrativos relacionados à aba Administrativo.
+    # Este bloco lida com comandos para obtenção de informações gerais da corretora, conta, posições,
+    # ordens e históricos (HISTORY_DATA, HISTORY_TRADES).
+    # Ajuste (versão 1.0.9.g - Correção AttributeError):
+    # - Alterado para usar self.streaming_active_by_broker em vez de self.streaming_active no método send_admin_command.
+
     def send_admin_command(self, command):
+        """
+        Envia um comando administrativo para o EA associado à corretora selecionada.
+        Este método roteia para funções específicas dependendo do comando (Administrativo,
+        Indicadores ou Streaming). Aqui, lida apenas com comandos da aba Administrativo.
+
+        Args:
+            command: Nome do comando a ser enviado (ex.: PING, HISTORY_DATA).
+        """
         broker_key = self.broker_combo.currentText()
         if not broker_key:
             self.update_log("Erro: Nenhuma corretora selecionada.")
@@ -379,7 +737,14 @@ class MT5TraderGui(QDialog):
             return
         payload = {}
         try:
-            if command == "HISTORY_DATA":
+            if command in ["PING", "GET_STATUS_INFO", "GET_BROKER_INFO", "GET_BROKER_SERVER",
+                           "GET_BROKER_PATH", "GET_ACCOUNT_INFO", "GET_ACCOUNT_BALANCE",
+                           "GET_ACCOUNT_LEVERAGE", "GET_ACCOUNT_FLAGS", "GET_ACCOUNT_MARGIN",
+                           "GET_ACCOUNT_STATE", "GET_TIME_SERVER", "POSITIONS", "ORDERS"]:
+                if command == "PING":
+                    payload = {"timestamp": int(time.time())}
+                asyncio.create_task(self.send_command(broker_key, command, payload, 'admin'))
+            elif command == "HISTORY_DATA":
                 symbol = self.history_data_symbol.text()
                 if not symbol:
                     self.update_log("Erro: Símbolo vazio")
@@ -411,34 +776,37 @@ class MT5TraderGui(QDialog):
                     "end_time": end_time
                 }
                 asyncio.create_task(self.send_command(broker_key, command, payload, 'admin'))
-            elif command == "PING":
-                payload = {"timestamp": int(time.time())}
-                asyncio.create_task(self.send_command(broker_key, command, payload, 'admin'))
-            elif command in ["GET_INDICATOR_MA", "GET_OHLC", "GET_TICK"]:
-                symbol = self.indicator_symbol.text()
-                if not symbol:
-                    self.update_log("Erro: Símbolo vazio")
+            elif command in ["START_STREAM_OHLC_INDICATORS", "STOP_STREAM_OHLC_INDICATORS"]:
+                # Verifica se o streaming está ativo para a corretora selecionada.
+                streaming_active = broker_key in self.streaming_active_by_broker and self.streaming_active_by_broker[
+                    broker_key]
+                if command == "START_STREAM_OHLC_INDICATORS" and streaming_active:
+                    self.update_log("Erro: Streaming já ativo. Clique em STOP_STREAM_OHLC_INDICATORS primeiro.")
                     return
-                payload = {"symbol": symbol}
-                if command in ["GET_INDICATOR_MA", "GET_OHLC"]:
-                    timeframe = self.indicator_timeframe.text()
-                    if not timeframe:
-                        self.update_log("Erro: Timeframe vazio")
-                        return
-                    payload["timeframe"] = timeframe
-                if command == "GET_INDICATOR_MA":
-                    period = int(self.indicator_period.text())
-                    if period <= 0:
-                        self.update_log("Erro: Período inválido")
-                        return
-                    payload["period"] = period
-                asyncio.create_task(self.send_data_command(broker_key, command, payload))
+                self._send_indicators_command(command)
+            elif command in ["GET_INDICATOR_MA", "GET_OHLC", "GET_TICK"]:
+                self._send_indicators_command(command)
             else:
-                asyncio.create_task(self.send_command(broker_key, command, payload, 'admin'))
+                self.update_log(f"Erro: Comando {command} não reconhecido.")
+                logger.error(f"Comando {command} não reconhecido.")
         except ValueError as e:
             self.update_log(f"❌ Erro nos parâmetros: {str(e)}")
+            logger.error(f"Erro nos parâmetros para comando {command}: {str(e)}")
+
+    # Bloco 8 - Comandos de Trading (Aba Trading)
+    # Objetivo: Definir a lógica para envio de comandos de trading relacionados à aba Trading.
+    # Este bloco lida com operações de mercado, como compra, venda, modificação e fechamento de posições.
+    # Ajuste (versão 1.0.9.g - Correção Comando):
+    # - Alterado para enviar TRADE_POSITION_CLOSE em vez de TRADE_POSITION_CLOSE_SYMBOL, mantendo o nome do botão.
 
     def send_trade_command(self, command):
+        """
+        Envia um comando de trading para o EA associado à corretora selecionada.
+        Lida com operações de mercado, incluindo ordens de compra/venda e gerenciamento de posições.
+
+        Args:
+            command: Nome do comando de trading a ser enviado (ex.: TRADE_ORDER_TYPE_BUY).
+        """
         broker_key = self.broker_combo.currentText()
         if not broker_key:
             self.update_log("Erro: Nenhuma corretora selecionada.")
@@ -513,6 +881,8 @@ class MT5TraderGui(QDialog):
                 payload = {
                     "symbol": symbol
                 }
+                # Ajusta o comando para o formato esperado pelo EA (TRADE_POSITION_CLOSE)
+                command = "TRADE_POSITION_CLOSE"
             elif command == "TRADE_ORDER_MODIFY":
                 ticket = int(self.trade_ticket.text())
                 if ticket <= 0:
@@ -532,7 +902,7 @@ class MT5TraderGui(QDialog):
                 "TRADE_ORDER_TYPE_BUY", "TRADE_ORDER_TYPE_SELL",
                 "TRADE_ORDER_TYPE_BUY_LIMIT", "TRADE_ORDER_TYPE_SELL_LIMIT",
                 "TRADE_ORDER_TYPE_BUY_STOP", "TRADE_ORDER_TYPE_SELL_STOP",
-                "TRADE_POSITION_CLOSE_SYMBOL"
+                "TRADE_POSITION_CLOSE"
             ]:
                 message = {"broker_key": broker_key, "command": command, "payload": payload,
                            "request_id": f"{command.lower()}_{broker_key}_{int(time.time())}"}
@@ -540,75 +910,135 @@ class MT5TraderGui(QDialog):
         except ValueError as e:
             self.update_log(f"❌ Erro nos parâmetros: {str(e)}")
 
-    @Slot(str)
-    def update_log(self, message):
-        if "TICK" not in message:
-            self.log_area.append(message)
-            lines = self.log_area.toPlainText().split('\n')
-            if len(lines) > 1000:
-                self.log_area.setText('\n'.join(lines[-1000:]))
+    # Bloco 9 - Comandos de Indicadores e Streaming (Aba Indicadores)
+    # Objetivo: Definir a lógica para envio de comandos relacionados à aba Indicadores, incluindo
+    # comandos single-shot (GET_INDICATOR_MA, GET_OHLC, GET_TICK) e streaming (START/STOP_STREAM_OHLC_INDICATORS).
+    # Este bloco corrige o problema de request_id inconsistente entre START e STOP de streaming,
+    # armazenando e reutilizando o request_id do START, e adiciona controle de botões.
+    # Ajuste (versão 1.0.9.g - Suporte a múltiplas corretoras):
+    # - Alterado para usar dicionário de request_id e estado de streaming por corretora.
 
-    @Slot(dict)
-    def _update_positions(self, positions):
-        text = f"Posições: {json.dumps(positions, indent=2)}"
-        self.log_area.append(text)
-        logger.debug(f"Posições atualizadas: {text}")
+    def _send_indicators_command(self, command):
+        """
+        Envia comandos relacionados à aba Indicadores para o EA associado à corretora selecionada.
+        Lida com comandos single-shot de indicadores e streaming de dados OHLC+Indicadores.
 
-    @Slot(dict)
-    def _update_orders(self, orders):
-        text = f"Ordens: {json.dumps(orders, indent=2)}"
-        self.log_area.append(text)
-        logger.debug(f"Ordens atualizadas: {text}")
+        Args:
+            command: Nome do comando a ser enviado (ex.: GET_INDICATOR_MA, START_STREAM_OHLC_INDICATORS).
+        """
+        broker_key = self.broker_combo.currentText()
+        if not broker_key:
+            self.update_log("Erro: Nenhuma corretora selecionada.")
+            logger.warning("Nenhuma corretora selecionada ao tentar enviar comando.")
+            return
+        payload = {}
+        try:
+            if command == "START_STREAM_OHLC_INDICATORS":
+                configs = []
+                for row in range(self.stream_table.rowCount()):
+                    symbol_item = self.stream_table.item(row, 0)
+                    timeframe_item = self.stream_table.item(row, 1)
+                    indicators_item = self.stream_table.item(row, 2)
+                    # Verifica se todos os campos estão preenchidos e não vazios
+                    if symbol_item and timeframe_item and indicators_item and \
+                            symbol_item.text() and timeframe_item.text() and indicators_item.text():
+                        symbol = symbol_item.text()
+                        timeframe = timeframe_item.text()
+                        indicators_str = indicators_item.text()
+                        indicators = []
+                        # Parseia a string de indicadores (ex: "MA,9;MA,21")
+                        for ind_entry in indicators_str.split(';'):
+                            if ind_entry:  # Garante que não é uma string vazia após split
+                                try:
+                                    type_, period = ind_entry.split(',')
+                                    indicators.append({"type": type_.strip(), "period": int(period.strip())})
+                                except ValueError:
+                                    self.update_log(
+                                        f"Erro: Formato inválido nos indicadores '{ind_entry}' da linha {row + 1}. Use 'TIPO,PERIODO'.")
+                                    return
+                            else:
+                                self.update_log(f"Aviso: Indicador vazio na linha {row + 1}. Ignorando.")
 
-    @Slot(dict)
-    def _update_history_data(self, history_data):
-        text = f"Histórico de Dados: {json.dumps(history_data, indent=2)}"
-        self.log_area.append(text)
-        logger.debug(f"Histórico de dados atualizado: {text}")
+                        if not indicators:  # Se a string de indicadores não gerou nenhum indicador válido
+                            self.update_log(
+                                f"Erro: Nenhum indicador válido encontrado na linha {row + 1}. Verifique o formato.")
+                            return
 
-    @Slot(dict)
-    def _update_history_trades(self, history_trades):
-        text = f"Histórico de Trades: {json.dumps(history_trades, indent=2)}"
-        self.log_area.append(text)
-        logger.debug(f"Histórico de trades atualizado: {text}")
+                        configs.append({
+                            "symbol": symbol.strip(),
+                            "timeframe": timeframe.strip(),
+                            "indicators": indicators
+                        })
+                    else:
+                        self.update_log(
+                            f"Aviso: Linha {row + 1} da tabela de streaming incompleta ou vazia. Ignorando.")
 
-    @Slot(dict)
-    def _update_trade_response(self, trade_response):
-        status = "✅ Sucesso" if trade_response.get(
-            'status') == 'OK' else f"❌ Erro: {trade_response.get('error_message', 'Desconhecido')}"
-        text = (
-            f"Resposta de Trading ({trade_response.get('broker_key')}): "
-            f"{json.dumps(trade_response, indent=2)}\nStatus: {status}"
-        )
-        self.log_area.append(text)
-        logger.debug(f"Resposta de trading atualizada: {text}")
+                if not configs:
+                    self.update_log("Erro: Nenhuma configuração de streaming válida adicionada na tabela.")
+                    return
+                payload = {"configs": configs}
+                # Gera o request_id para START_STREAM_OHLC_INDICATORS e o armazena para uso no STOP, específico para esta corretora.
+                request_id = f"start_stream_ohlc_indicators_{broker_key}_{int(time.time())}"
+                self.stream_ohlc_indicators_request_ids[broker_key] = request_id
+                self.update_log(f"Iniciando streaming com request_id: {request_id} para {broker_key}")
+                logger.info(f"Armazenado request_id para START_STREAM_OHLC_INDICATORS de {broker_key}: {request_id}")
+                # Desativa o botão START_STREAM_OHLC_INDICATORS e marca streaming como ativo para esta corretora.
+                self.start_stream_indicators_btn.setEnabled(False)
+                self.streaming_active_by_broker[broker_key] = True
+                asyncio.create_task(self.send_command(broker_key, command, payload, 'data', use_data_port=True))
+            elif command == "STOP_STREAM_OHLC_INDICATORS":
+                # Reutiliza o request_id armazenado do START_STREAM_OHLC_INDICATORS para a corretora atual, se disponível.
+                if broker_key in self.stream_ohlc_indicators_request_ids and self.stream_ohlc_indicators_request_ids[
+                    broker_key]:
+                    request_id = self.stream_ohlc_indicators_request_ids[broker_key]
+                    self.update_log(f"Parando streaming com request_id: {request_id} para {broker_key}")
+                    logger.info(
+                        f"Reutilizando request_id para STOP_STREAM_OHLC_INDICATORS de {broker_key}: {request_id}")
+                    # Passa o request_id armazenado explicitamente para o método send_command.
+                    asyncio.create_task(self.zmq_router.send_command_to_broker(
+                        broker_key, command, payload, request_id, use_data_port=True))
+                    # Limpa o request_id armazenado após o STOP para esta corretora.
+                    self.stream_ohlc_indicators_request_ids[broker_key] = None
+                    # Reativa o botão START_STREAM_OHLC_INDICATORS e marca streaming como inativo para esta corretora.
+                    self.start_stream_indicators_btn.setEnabled(True)
+                    self.streaming_active_by_broker[broker_key] = False
+                    self.update_log(f"Botão START_STREAM_OHLC_INDICATORS reativado para {broker_key}.")
+                    logger.info(f"Botão START_STREAM_OHLC_INDICATORS reativado após STOP para {broker_key}.")
+                else:
+                    self.update_log(
+                        f"Erro: Nenhum streaming ativo encontrado para parar na corretora {broker_key}. Inicie um streaming primeiro.")
+                    logger.warning(f"Nenhum request_id armazenado para STOP_STREAM_OHLC_INDICATORS de {broker_key}.")
+                    # Reativa o botão START_STREAM_OHLC_INDICATORS mesmo se não houver streaming ativo para esta corretora.
+                    self.start_stream_indicators_btn.setEnabled(True)
+                    if broker_key in self.streaming_active_by_broker:
+                        self.streaming_active_by_broker[broker_key] = False
+            elif command in ["GET_INDICATOR_MA", "GET_OHLC", "GET_TICK"]:
+                symbol = self.indicator_symbol.text()
+                if not symbol:
+                    self.update_log("Erro: Símbolo vazio")
+                    return
+                payload = {"symbol": symbol}
+                if command in ["GET_INDICATOR_MA", "GET_OHLC"]:
+                    timeframe = self.indicator_timeframe.text()
+                    if not timeframe:
+                        self.update_log("Erro: Timeframe vazio")
+                        return
+                    payload["timeframe"] = timeframe
+                if command == "GET_INDICATOR_MA":
+                    period = int(self.indicator_period.text())
+                    if period <= 0:
+                        self.update_log("Erro: Período inválido")
+                        return
+                    payload["period"] = period
+                asyncio.create_task(self.send_data_command(broker_key, command, payload))
+        except ValueError as e:
+            self.update_log(f"❌ Erro nos parâmetros: {str(e)}")
+            logger.error(f"Erro nos parâmetros para comando {command}: {str(e)}")
+            # Caso haja erro nos parâmetros do START, reativa o botão START_STREAM_OHLC_INDICATORS.
+            if command == "START_STREAM_OHLC_INDICATORS":
+                self.start_stream_indicators_btn.setEnabled(True)
+                if broker_key in self.streaming_active_by_broker:
+                    self.streaming_active_by_broker[broker_key] = False
 
-    @Slot(dict)
-    def _update_indicator_ma(self, data):
-        status = "✅ Sucesso" if 'ma_value' in data else "❌ Erro"
-        text = f"Média Móvel ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
-        self.log_area.append(text)
-        logger.debug(f"Média Móvel atualizada: {text}")
-
-    @Slot(dict)
-    def _update_ohlc(self, data):
-        status = "✅ Sucesso" if 'ohlc' in data and data['ohlc'] else "❌ Erro"
-        text = f"OHLC ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
-        self.log_area.append(text)
-        logger.debug(f"OHLC atualizado: {text}")
-
-    @Slot(dict)
-    def _update_tick(self, data):
-        status = "✅ Sucesso" if 'tick' in data and data['tick'] else "❌ Erro"
-        text = f"Tick ({data.get('broker_key')}): {json.dumps(data, indent=2)}\nStatus: {status}"
-        self.log_area.append(text)
-        logger.debug(f"Tick atualizado: {text}")
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MT5TraderGui(None, None, None, None, None)
-    window.show()
-    sys.exit(app.exec())
-
-# ------------ término do arquivo mt5_trader_gui.py ------------
-# Versão 1.0.9.e - Envio 3
+# gui/mt5_trader_gui.py
+# Versão 1.0.9.g - Envio 7  -->
