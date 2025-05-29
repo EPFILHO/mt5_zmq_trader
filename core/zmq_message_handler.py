@@ -1,12 +1,13 @@
 # core/zmq_message_handler.py
-# Versão 1.0.9.e - Envio 2
+# Versão 1.0.9.k - Envio 8
 # Ajustes:
-# - Corrigida extração de dados para GET_OHLC e GET_TICK no handle_zmq_message, usando message.get("", {}) em vez de message.get("ohlc", {}) e message.get("tick", {}), para alinhar com a chave vazia recebida do EA.
-# - Mantidas todas as funcionalidades do envio anterior (1.0.9.d):
-#   - Adicionados sinais indicator_ma_received, ohlc_received, tick_received.
-#   - Lógica para processar respostas de GET_INDICATOR_MA, GET_OHLC, GET_TICK.
-#   - Funcionalidades do envio 8 (1.0.9.a).
-# - Versão alinhada com ZmqTraderBridge 1.0.9.e.
+# - Adicionado suporte ao evento OHLC_INDICATOR_UPDATE com sinal stream_ohlc_indicators_received.
+# - Mantido o fallback para chave vazia "" em OHLC_UPDATE.
+# - Todas as funcionalidades anteriores preservadas (de 1.0.9.j):
+#   - Correção de OHLC_UPDATE com fallback message.get("", {}).
+#   - Sinais para START_STREAM_OHLC, STOP_STREAM, OHLC_UPDATE.
+#   - Suporte a GET_OHLC, GET_TICK, indicator_ma_received, etc.
+# - Alinhado com ZmqTraderBridge 1.10, MT5TraderGui 1.0.9.g, ZmqRouter 1.0.9.b.
 
 import logging
 import time
@@ -35,6 +36,8 @@ class ZmqMessageHandler(QObject):
     indicator_ma_received = Signal(dict)
     ohlc_received = Signal(dict)
     tick_received = Signal(dict)
+    stream_ohlc_received = Signal(dict)
+    stream_ohlc_indicators_received = Signal(dict)  # NOVO: Sinal para OHLC com indicadores
 
     def __init__(self, config, zmq_router, parent=None):
         super().__init__(parent)
@@ -96,6 +99,31 @@ class ZmqMessageHandler(QObject):
                     logger.info(f"Heartbeat ativo para {broker_key_hb}")
                     self.heartbeat_active[broker_key_hb] = True
             logger.debug(f"Heartbeat recebido de {broker_key_hb or client_id_hex}")
+
+        elif msg_type == "STREAM" and event == "OHLC_UPDATE":
+            stream_data = {
+                "ohlc": message.get("ohlc", message.get("", {})),  # Fallback para chave vazia
+                "broker_key": identified_broker_key,
+                "request_id": message.get("request_id", ""),
+                "timestamp_mql": message.get("timestamp_mql", 0)
+            }
+            self.stream_ohlc_received.emit(stream_data)
+            logger.info(f"Emitido stream_ohlc_received: {stream_data}")
+
+        elif msg_type == "STREAM" and event == "OHLC_INDICATOR_UPDATE":  # NOVO: Processamento do novo evento
+            data = message.get("data", [])
+            for entry in data:
+                stream_data = {
+                    "symbol": entry.get("symbol", ""),
+                    "timeframe": entry.get("timeframe", ""),
+                    "ohlc": entry.get("ohlc", {}),
+                    "indicators": entry.get("indicators", []),
+                    "broker_key": identified_broker_key,
+                    "request_id": message.get("request_id", ""),
+                    "timestamp_mql": message.get("timestamp_mql", 0)
+                }
+                self.stream_ohlc_indicators_received.emit(stream_data)
+                logger.info(f"Emitido stream_ohlc_indicators_received para {stream_data['symbol']}: {stream_data}")
 
         elif msg_type == "RESPONSE":
             request_id = message.get("request_id", "")
@@ -310,6 +338,34 @@ class ZmqMessageHandler(QObject):
                     error = message.get("error_message", "Erro desconhecido")
                     self.log_message_received.emit(f"ERROR: Falha ao obter Tick: {error}")
                     logger.error(f"GET_TICK falhou: {error}")
+            elif "start_stream_ohlc_" in request_id:
+                stream_data = {
+                    "status": status,
+                    "message": message.get("message", "N/A"),
+                    "broker_key": identified_broker_key,
+                    "request_id": request_id
+                }
+                self.stream_ohlc_received.emit(stream_data)
+                if status == "OK":
+                    logger.info(f"Emitido stream_ohlc_received para START_STREAM_OHLC: {stream_data}")
+                else:
+                    error = message.get("error_message", "Erro desconhecido")
+                    self.log_message_received.emit(f"ERROR: Falha ao iniciar streaming OHLC: {error}")
+                    logger.error(f"START_STREAM_OHLC falhou: {error}")
+            elif "stop_stream_" in request_id:
+                stream_data = {
+                    "status": status,
+                    "message": message.get("message", "N/A"),
+                    "broker_key": identified_broker_key,
+                    "request_id": request_id
+                }
+                self.stream_ohlc_received.emit(stream_data)
+                if status == "OK":
+                    logger.info(f"Emitido stream_ohlc_received para STOP_STREAM: {stream_data}")
+                else:
+                    error = message.get("error_message", "Erro desconhecido")
+                    self.log_message_received.emit(f"ERROR: Falha ao parar streaming OHLC: {error}")
+                    logger.error(f"STOP_STREAM falhou: {error}")
             elif "trade_" in request_id.lower() or "close_" in request_id.lower() or "modify_" in request_id.lower() or "partial_" in request_id.lower():
                 if status == "OK":
                     trade_response = {
@@ -359,4 +415,4 @@ class ZmqMessageHandler(QObject):
         ))
 
 # ------------ término do arquivo zmq_message_handler.py ------------
-# Versão 1.0.9.e - Envio 2
+# Versão 1.0.9.f - Envio 8
