@@ -1,34 +1,61 @@
 //+------------------------------------------------------------------+
 //|                                              ZmqTraderBridge.mq5 |
 //|                        MQL5 <-> Python ZeroMQ Bridge for Trading |
-//|                                              Seu Nome / Empresa  |
+//|                                              EPFilho / Empresa   |
 //+------------------------------------------------------------------+
 #property copyright "EPFilho"
 #property link      "epfilho73@gmail.com"
-#property version   "1.10"
+#property version   "1.11"
 #property strict
 
-#include <Zmq/Zmq.mqh> // https://github.com/dingmaotu/mql-zmq
-#include <Json.mqh>    // https://github.com/xefino/mql5-json
+#include <Zmq/Zmq.mqh>
+#include <Json.mqh>
 #include <Trade\Trade.mqh>
 
+//+------------------------------------------------------------------+
+//| Bloco 1 - Configuração e Conexão ZMQ                            |
+//| - Contém variáveis globais, parâmetros de entrada, leitura de   |
+//|   config.ini, conexão com sockets ZMQ, e funções de envio/      |
+//|   recebimento de mensagens.                                     |
+//| - Este bloco é a base para comunicação com o Python via ZMQ.    |
+//| - Observação: Futuro suporte para streaming de ticks pode       |
+//|   incluir um novo socket exclusivo (tick_socket).               |
+//+------------------------------------------------------------------+
+
 //--- Parâmetros configuráveis
-input int    InpTimerIntervalMs  = 500;                    // Intervalo do timer
+input int    InpTimerIntervalMs  = 200;                    // Intervalo do timer (ms)
 input bool   InpDebugLog         = true;                   // Ativar logs
 
 //--- Variáveis globais
 Context context;
-Socket  admin_socket(context, ZMQ_DEALER);     // Socket para comunicação administrativa
-Socket  data_socket(context, ZMQ_DEALER);      // Socket para dados (GET_OHLC, GET_TICK, GET_INDICATOR_MA)
-Socket  trade_socket(context, ZMQ_SUB);        // Trade Socket
-Socket  live_socket(context, ZMQ_PUB);         // Live Socket
-Socket  stream_socket(context, ZMQ_PUB);       // Streaming Socket
+Socket  admin_socket(context, ZMQ_DEALER);
+Socket  data_socket(context, ZMQ_DEALER);
+Socket  trade_socket(context, ZMQ_SUB);
+Socket  live_socket(context, ZMQ_PUB);
+Socket  stream_socket(context, ZMQ_PUB);
 bool    g_is_connected = false;
 datetime g_last_ping_time = 0;
 long    g_ping_latency = 0;
 CTrade  trade;
 
-//--- Variáveis para configurações do config.ini
+//--- Estruturas para streaming
+struct IndicatorConfig {
+   string type;
+   int    period;
+};
+
+struct StreamRequest {
+   string symbol;
+   ENUM_TIMEFRAMES timeframe;
+   string request_id;
+   datetime last_sent_time;
+   IndicatorConfig indicators[];
+};
+
+StreamRequest g_stream_requests[];
+bool g_streaming_active = false;
+
+//--- Variáveis para config.ini
 string g_brokerKey = "";
 int    g_adminPort = 0;
 int    g_dataPort = 0;
@@ -143,7 +170,11 @@ string RobustJsonSerialize(JSONNode &json_message)
    if(real_len == 0 || msg[real_len-1] != '}')
    {
       Print("ZmqTraderBridge WARN: JSON não termina com '}'. Corrigindo.");
-      msg += "}";
+      msg = StringSubstr(msg, 0, StringFind(msg, "}") + 1);
+      if(StringFind(msg, "}") == -1)
+      {
+         msg += "}";
+      }
    }
    return msg;
 }
@@ -210,6 +241,14 @@ bool SendErrorResponse(const string request_id, const string error_message, Sock
    response["error_message"] = error_message;
    return SendJsonMessage(response, response_socket, socket_name);
 }
+//+------------------------------------------------------------------+
+//| Bloco 2 - Comandos Administrativos                              |
+//| - Contém handlers para comandos relacionados a informações da   |
+//|   conta, broker, status do terminal, posições, ordens e histórico.|
+//| - Este bloco processa solicitações administrativas enviadas pelo |
+//|   Python, retornando dados gerais sobre a conta e o mercado.    |
+//+------------------------------------------------------------------+
+
 
 //+------------------------------------------------------------------+
 //| Comando PING                                                    |
@@ -466,25 +505,10 @@ void HandleGetOrdersCommand(const string request_id, Socket &response_socket, st
 //+------------------------------------------------------------------+
 void HandleGetHistoryDataCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   string timeframe = "";
-   JSONNode *tf_node = payload["timeframe"];
-   if(CheckPointer(tf_node) != POINTER_INVALID)
-      timeframe = tf_node.ToString();
-
-   long start_time = 0;
-   JSONNode *start_node = payload["start_time"];
-   if(CheckPointer(start_node) != POINTER_INVALID)
-      start_time = start_node.ToInteger();
-
-   long end_time = 0;
-   JSONNode *end_node = payload["end_time"];
-   if(CheckPointer(end_node) != POINTER_INVALID)
-      end_time = end_node.ToInteger();
+   string symbol = payload["symbol"].ToString();
+   string timeframe = payload["timeframe"].ToString();
+   long start_time = payload["start_time"].ToInteger();
+   long end_time = payload["end_time"].ToInteger();
 
    ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
    if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
@@ -523,15 +547,8 @@ void HandleGetHistoryDataCommand(const string request_id, JSONNode &payload, Soc
 //+------------------------------------------------------------------+
 void HandleGetHistoryTradesCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long start_time = 0;
-   JSONNode *start_node = payload["start_time"];
-   if(CheckPointer(start_node) != POINTER_INVALID)
-      start_time = start_node.ToInteger();
-
-   long end_time = 0;
-   JSONNode *end_node = payload["end_time"];
-   if(CheckPointer(end_node) != POINTER_INVALID)
-      end_time = end_node.ToInteger();
+   long start_time = payload["start_time"].ToInteger();
+   long end_time = payload["end_time"].ToInteger();
 
    if(!HistorySelect((datetime)start_time, (datetime)end_time))
    {
@@ -565,46 +582,188 @@ void HandleGetHistoryTradesCommand(const string request_id, JSONNode &payload, S
    response["trades"] = trades_array;
    SendJsonMessage(response, response_socket, socket_name);
 }
+//+------------------------------------------------------------------+
+//| Bloco 3 - Comandos de Dados e Indicadores                       |
+//| - Contém handlers para obter dados de mercado como OHLC, Tick,  |
+//|   e indicadores (ex.: MA).                                      |
+//| - Inclui funções auxiliares para processar indicadores e        |
+//|   timeframes.                                                   |
+//| - Este bloco será expandido para suportar novos indicadores     |
+//|   (EMA, RSI) e timeframes personalizados (M2, M3, M10, H2).    |
+//| - Futuro: Adicionar comando GET_SYMBOL_INFO para dados de ativos|
+//|   (moeda, volume mínimo, swap, etc.).                          |
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| Comando TRADE_ORDER_TYPE_BUY                                     |
+//| Função auxiliar para obter valores de indicadores               |
+//+------------------------------------------------------------------+
+bool CopyIndicatorBuffer(string symbol, ENUM_TIMEFRAMES timeframe, string indicator_type, int period, double &values[])
+{
+   if(indicator_type == "MA")
+   {
+      int handle = iMA(symbol, timeframe, period, 0, MODE_SMA, PRICE_CLOSE);
+      if(handle == INVALID_HANDLE)
+      {
+         Print("ZmqTraderBridge ERROR: Falha ao criar handle do indicador MA");
+         return false;
+      }
+      int copied = CopyBuffer(handle, 0, 0, 1, values);
+      IndicatorRelease(handle);
+      if(copied <= 0)
+      {
+         Print("ZmqTraderBridge ERROR: Falha ao obter valores do indicador MA");
+         return false;
+      }
+      return true;
+   }
+   Print("ZmqTraderBridge ERROR: Indicador não suportado: ", indicator_type);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Comando GET_INDICATOR_MA                                        |
+//+------------------------------------------------------------------+
+void HandleGetIndicatorMACommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   string symbol = payload["symbol"].ToString();
+   string timeframe = payload["timeframe"].ToString();
+   int period = (int)payload["period"].ToInteger();
+
+   if(symbol == "" || period <= 0)
+   {
+      SendErrorResponse(request_id, "Parâmetros inválidos: symbol ou period", response_socket, socket_name);
+      return;
+   }
+
+   ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+
+   double ma_values[];
+   ArrayResize(ma_values, 1);
+   if(!CopyIndicatorBuffer(symbol, tf, "MA", period, ma_values))
+   {
+      SendErrorResponse(request_id, "Falha ao obter valores do indicador MA", response_socket, socket_name);
+      return;
+   }
+
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   response["ma_value"] = ma_values[0];
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
+//| Comando GET_OHLC                                                |
+//+------------------------------------------------------------------+
+void HandleGetOHLCCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   string symbol = payload["symbol"].ToString();
+   string timeframe = payload["timeframe"].ToString();
+
+   if(symbol == "")
+   {
+      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      return;
+   }
+
+   ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+
+   MqlRates rates[];
+   ArrayResize(rates, 1);
+   int copied = CopyRates(symbol, tf, 0, 1, rates);
+   if(copied <= 0)
+   {
+      SendErrorResponse(request_id, "Falha ao obter dados OHLC", response_socket, socket_name);
+      return;
+   }
+
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   JSONNode ohlc;
+   ohlc["time"] = (long)rates[0].time;
+   ohlc["open"] = rates[0].open;
+   ohlc["high"] = rates[0].high;
+   ohlc["low"] = rates[0].low;
+   ohlc["close"] = rates[0].close;
+   ohlc["volume"] = (long)rates[0].tick_volume;
+   response["ohlc"] = ohlc;
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
+//| Comando GET_TICK                                                |
+//+------------------------------------------------------------------+
+void HandleGetTickCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   string symbol = payload["symbol"].ToString();
+
+   if(symbol == "")
+   {
+      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      return;
+   }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick))
+   {
+      SendErrorResponse(request_id, "Falha ao obter dados de tick", response_socket, socket_name);
+      return;
+   }
+
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   JSONNode tick_data;
+   tick_data["time"] = (long)tick.time;
+   tick_data["bid"] = tick.bid;
+   tick_data["ask"] = tick.ask;
+   tick_data["volume"] = (long)tick.volume;
+   response["tick"] = tick_data;
+   SendJsonMessage(response, response_socket, socket_name);
+}
+
+//+------------------------------------------------------------------+
+//| Conversão de string para timeframe                              |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES StringToTimeframe(string tf)
+{
+   if(tf == "M1") return PERIOD_M1;
+   if(tf == "M5") return PERIOD_M5;
+   if(tf == "M15") return PERIOD_M15;
+   if(tf == "M30") return PERIOD_M30;
+   if(tf == "H1") return PERIOD_H1;
+   if(tf == "H4") return PERIOD_H4;
+   if(tf == "D1") return PERIOD_D1;
+   if(tf == "W1") return PERIOD_W1;
+   if(tf == "MN1") return PERIOD_MN1;
+   return PERIOD_CURRENT;
+}
+//+------------------------------------------------------------------+
+//| Bloco 4 - Comandos de Trading                                   |
+//| - Contém handlers para operações de trading como compra, venda, |
+//|   modificação e fechamento de posições e ordens.                |
+//| - Este bloco processa comandos enviados pelo Python para        |
+//|   executar operações no mercado via MetaTrader.                |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Comando TRADE_ORDER_TYPE_BUY                                    |
 //+------------------------------------------------------------------+
 void HandleTradeBuyCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.Buy(volume, symbol, price, sl, tp, comment))
@@ -631,40 +790,13 @@ void HandleTradeBuyCommand(const string request_id, JSONNode &payload, Socket &r
 //+------------------------------------------------------------------+
 void HandleTradeSellCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.Sell(volume, symbol, price, sl, tp, comment))
@@ -691,40 +823,13 @@ void HandleTradeSellCommand(const string request_id, JSONNode &payload, Socket &
 //+------------------------------------------------------------------+
 void HandleTradeBuyLimitCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.BuyLimit(volume, price, symbol, sl, tp, 0, 0, comment))
@@ -751,40 +856,13 @@ void HandleTradeBuyLimitCommand(const string request_id, JSONNode &payload, Sock
 //+------------------------------------------------------------------+
 void HandleTradeSellLimitCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.SellLimit(volume, price, symbol, sl, tp, 0, 0, comment))
@@ -811,40 +889,13 @@ void HandleTradeSellLimitCommand(const string request_id, JSONNode &payload, Soc
 //+------------------------------------------------------------------+
 void HandleTradeBuyStopCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.BuyStop(volume, price, symbol, sl, tp, 0, 0, comment))
@@ -871,40 +922,13 @@ void HandleTradeBuyStopCommand(const string request_id, JSONNode &payload, Socke
 //+------------------------------------------------------------------+
 void HandleTradeSellStopCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
-
-   int deviation = 0;
-   JSONNode *dev_node = payload["deviation"];
-   if(CheckPointer(dev_node) != POINTER_INVALID)
-      deviation = (int)dev_node.ToInteger();
-
-   string comment = "";
-   JSONNode *comment_node = payload["comment"];
-   if(CheckPointer(comment_node) != POINTER_INVALID)
-      comment = comment_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   double volume = payload["volume"].ToDouble();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
+   int deviation = (int)payload["deviation"].ToInteger();
+   string comment = payload["comment"].ToString();
 
    trade.SetDeviationInPoints(deviation);
    if(!trade.SellStop(volume, price, symbol, sl, tp, 0, 0, comment))
@@ -931,20 +955,9 @@ void HandleTradeSellStopCommand(const string request_id, JSONNode &payload, Sock
 //+------------------------------------------------------------------+
 void HandleTradePositionModifyCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long ticket = 0;
-   JSONNode *ticket_node = payload["ticket"];
-   if(CheckPointer(ticket_node) != POINTER_INVALID)
-      ticket = ticket_node.ToInteger();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
+   long ticket = payload["ticket"].ToInteger();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
 
    if(!trade.PositionModify(ticket, sl, tp))
    {
@@ -966,15 +979,8 @@ void HandleTradePositionModifyCommand(const string request_id, JSONNode &payload
 //+------------------------------------------------------------------+
 void HandleTradePositionPartialCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long ticket = 0;
-   JSONNode *ticket_node = payload["ticket"];
-   if(CheckPointer(ticket_node) != POINTER_INVALID)
-      ticket = ticket_node.ToInteger();
-
-   double volume = 0.0;
-   JSONNode *vol_node = payload["volume"];
-   if(CheckPointer(vol_node) != POINTER_INVALID)
-      volume = vol_node.ToDouble();
+   long ticket = payload["ticket"].ToInteger();
+   double volume = payload["volume"].ToDouble();
 
    if(!PositionSelectByTicket(ticket))
    {
@@ -1004,10 +1010,7 @@ void HandleTradePositionPartialCommand(const string request_id, JSONNode &payloa
 //+------------------------------------------------------------------+
 void HandleTradePositionCloseIdCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long ticket = 0;
-   JSONNode *ticket_node = payload["ticket"];
-   if(CheckPointer(ticket_node) != POINTER_INVALID)
-      ticket = ticket_node.ToInteger();
+   long ticket = payload["ticket"].ToInteger();
 
    if(!trade.PositionClose(ticket))
    {
@@ -1027,14 +1030,11 @@ void HandleTradePositionCloseIdCommand(const string request_id, JSONNode &payloa
 }
 
 //+------------------------------------------------------------------+
-//| Comando TRADE_POSITION_CLOSE_SYMBOL                             |
+//| Comando TRADE_POSITION_CLOSE(SYMBOL)                             |
 //+------------------------------------------------------------------+
 void HandleTradePositionCloseSymbolCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
+   string symbol = payload["symbol"].ToString();
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -1063,25 +1063,10 @@ void HandleTradePositionCloseSymbolCommand(const string request_id, JSONNode &pa
 //+------------------------------------------------------------------+
 void HandleTradeOrderModifyCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long ticket = 0;
-   JSONNode *ticket_node = payload["ticket"];
-   if(CheckPointer(ticket_node) != POINTER_INVALID)
-      ticket = ticket_node.ToInteger();
-
-   double price = 0.0;
-   JSONNode *price_node = payload["price"];
-   if(CheckPointer(price_node) != POINTER_INVALID)
-      price = price_node.ToDouble();
-
-   double sl = 0.0;
-   JSONNode *sl_node = payload["sl"];
-   if(CheckPointer(sl_node) != POINTER_INVALID)
-      sl = sl_node.ToDouble();
-
-   double tp = 0.0;
-   JSONNode *tp_node = payload["tp"];
-   if(CheckPointer(tp_node) != POINTER_INVALID)
-      tp = tp_node.ToDouble();
+   long ticket = payload["ticket"].ToInteger();
+   double price = payload["price"].ToDouble();
+   double sl = payload["sl"].ToDouble();
+   double tp = payload["tp"].ToDouble();
 
    if(!trade.OrderModify(ticket, price, sl, tp, ORDER_TIME_GTC, 0))
    {
@@ -1103,10 +1088,7 @@ void HandleTradeOrderModifyCommand(const string request_id, JSONNode &payload, S
 //+------------------------------------------------------------------+
 void HandleTradeOrderCancelCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   long ticket = 0;
-   JSONNode *ticket_node = payload["ticket"];
-   if(CheckPointer(ticket_node) != POINTER_INVALID)
-      ticket = ticket_node.ToInteger();
+   long ticket = payload["ticket"].ToInteger();
 
    if(!trade.OrderDelete(ticket))
    {
@@ -1122,158 +1104,238 @@ void HandleTradeOrderCancelCommand(const string request_id, JSONNode &payload, S
    response["result"] = trade.ResultComment();
    SendJsonMessage(response, response_socket, socket_name);
 }
+//+------------------------------------------------------------------+
+//| Bloco 5 - Streaming de Dados                                    |
+//| - Contém handlers para iniciar/parar streaming de OHLC e       |
+//|   indicadores, além da lógica de envio de atualizações.        |
+//| - Este bloco será ajustado para consolidar respostas em uma    |
+//|   única mensagem por ciclo do OnTimer (evitar respostas        |
+//|   "picadas") e substituir streams existentes com mesmo       |
+//|   request_id.                                                  |
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| Novo Comando GET_INDICATOR_MA - Média Móvel Simples (SMA)       |
+//| Comando START_STREAM_OHLC                                       |
 //+------------------------------------------------------------------+
-void HandleGetIndicatorMACommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+void HandleStartStreamOHLCCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   // Extrai os parâmetros do payload
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   string timeframe = payload["timeframe"].ToString();
 
-   string timeframe = "";
-   JSONNode *tf_node = payload["timeframe"];
-   if(CheckPointer(tf_node) != POINTER_INVALID)
-      timeframe = tf_node.ToString();
-
-   int period = 0;
-   JSONNode *period_node = payload["period"];
-   if(CheckPointer(period_node) != POINTER_INVALID)
-      period = (int)period_node.ToInteger();
-
-   // Valida parâmetros
-   if(symbol == "" || period <= 0)
+   if(symbol == "" || timeframe == "")
    {
-      SendErrorResponse(request_id, "Parâmetros inválidos: symbol ou period", response_socket, socket_name);
+      SendErrorResponse(request_id, "Parâmetros inválidos: symbol ou timeframe", response_socket, socket_name);
       return;
    }
 
-   // Converte o timeframe para ENUM_TIMEFRAMES
    ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
    if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
 
-   // Cria o handle do indicador Média Móvel Simples (SMA)
-   int handle = iMA(symbol, tf, period, 0, MODE_SMA, PRICE_CLOSE);
-   if(handle == INVALID_HANDLE)
-   {
-      SendErrorResponse(request_id, "Falha ao criar handle do indicador MA", response_socket, socket_name);
-      return;
-   }
+   int index = ArraySize(g_stream_requests);
+   ArrayResize(g_stream_requests, index + 1);
+   g_stream_requests[index].symbol = symbol;
+   g_stream_requests[index].timeframe = tf;
+   g_stream_requests[index].request_id = request_id;
+   g_stream_requests[index].last_sent_time = 0;
 
-   // Copia o último valor da Média Móvel
-   double ma_values[];
-   int copied = CopyBuffer(handle, 0, 0, 1, ma_values);
-   IndicatorRelease(handle); // Libera o handle para evitar vazamento de memória
+   g_streaming_active = true;
+   if(InpDebugLog) PrintFormat("ZMQ Bridge: Iniciado streaming OHLC para %s, timeframe=%s", symbol, timeframe);
 
-   if(copied <= 0)
-   {
-      SendErrorResponse(request_id, "Falha ao obter valores do indicador MA", response_socket, socket_name);
-      return;
-   }
-
-   // Monta a resposta JSON
    JSONNode response;
    response["type"] = "RESPONSE";
    response["request_id"] = request_id;
    response["status"] = "OK";
-   response["ma_value"] = ma_values[0];
+   response["message"] = "Streaming OHLC iniciado";
    SendJsonMessage(response, response_socket, socket_name);
 }
 
 //+------------------------------------------------------------------+
-//| Novo Comando GET_OHLC - Último Candle OHLC                     |
+//| Comando STOP_STREAM                                             |
 //+------------------------------------------------------------------+
-void HandleGetOHLCCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+void HandleStopStreamCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   // Extrai os parâmetros do payload
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
+   string symbol = payload["symbol"].ToString();
+   string timeframe = payload["timeframe"].ToString();
 
-   string timeframe = "";
-   JSONNode *tf_node = payload["timeframe"];
-   if(CheckPointer(tf_node) != POINTER_INVALID)
-      timeframe = tf_node.ToString();
-
-   // Valida parâmetros
-   if(symbol == "")
+   bool found = false;
+   for(int i = ArraySize(g_stream_requests) - 1; i >= 0; i--)
    {
-      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      if(g_stream_requests[i].symbol == symbol && g_stream_requests[i].timeframe == StringToTimeframe(timeframe))
+      {
+         for(int j = i; j < ArraySize(g_stream_requests) - 1; j++)
+         {
+            g_stream_requests[j] = g_stream_requests[j + 1];
+         }
+         ArrayResize(g_stream_requests, ArraySize(g_stream_requests) - 1);
+         found = true;
+      }
+   }
+
+   if(!found)
+   {
+      SendErrorResponse(request_id, "Streaming não encontrado para symbol/timeframe", response_socket, socket_name);
       return;
    }
 
-   // Converte o timeframe para ENUM_TIMEFRAMES
-   ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
-   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+   g_streaming_active = ArraySize(g_stream_requests) > 0;
+   if(InpDebugLog) PrintFormat("ZMQ Bridge: Streaming OHLC parado para %s, timeframe=%s", symbol, timeframe);
 
-   // Copia o último candle
-   MqlRates rates[];
-   int copied = CopyRates(symbol, tf, 0, 1, rates);
-   if(copied <= 0)
-   {
-      SendErrorResponse(request_id, "Falha ao obter dados OHLC", response_socket, socket_name);
-      return;
-   }
-
-   // Monta a resposta JSON
    JSONNode response;
    response["type"] = "RESPONSE";
    response["request_id"] = request_id;
    response["status"] = "OK";
-   JSONNode ohlc;
-   ohlc["time"] = (long)rates[0].time;
-   ohlc["open"] = rates[0].open;
-   ohlc["high"] = rates[0].high;
-   ohlc["low"] = rates[0].low;
-   ohlc["close"] = rates[0].close;
-   ohlc["volume"] = (long)rates[0].tick_volume;
-   response["ohlc"] = ohlc;
+   response["message"] = "Streaming OHLC parado";
    SendJsonMessage(response, response_socket, socket_name);
 }
 
 //+------------------------------------------------------------------+
-//| Novo Comando GET_TICK - Último Tick Bid/Ask                    |
+//| Comando START_STREAM_OHLC_INDICATORS                            |
 //+------------------------------------------------------------------+
-void HandleGetTickCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+void HandleStartStreamOHLCIndicatorsCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
 {
-   // Extrai os parâmetros do payload
-   string symbol = "";
-   JSONNode *symbol_node = payload["symbol"];
-   if(CheckPointer(symbol_node) != POINTER_INVALID)
-      symbol = symbol_node.ToString();
-
-   // Valida parâmetros
-   if(symbol == "")
+   JSONNode *configs_node_ptr = payload["configs"];
+   if(CheckPointer(configs_node_ptr) == POINTER_INVALID)
    {
-      SendErrorResponse(request_id, "Parâmetro inválido: symbol", response_socket, socket_name);
+      SendErrorResponse(request_id, "Payload sem configs array", response_socket, socket_name);
       return;
    }
 
-   // Obtém o último tick
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick))
+   int configs_size = configs_node_ptr.Size();
+   if(configs_size == 0)
    {
-      SendErrorResponse(request_id, "Falha ao obter dados de tick", response_socket, socket_name);
+      SendErrorResponse(request_id, "Array de configs vazio", response_socket, socket_name);
       return;
    }
 
-   // Monta a resposta JSON
+   // Limpar quaisquer streams existentes associados a este request_id
+   for(int i = ArraySize(g_stream_requests) - 1; i >= 0; i--)
+   {
+      if(g_stream_requests[i].request_id == request_id)
+      {
+         for(int j = i; j < ArraySize(g_stream_requests) - 1; j++)
+         {
+            g_stream_requests[j] = g_stream_requests[j + 1];
+         }
+         ArrayResize(g_stream_requests, ArraySize(g_stream_requests) - 1);
+      }
+   }
+
+   int config_count = 0;
+   for(int i = 0; i < configs_size; i++)
+   {
+      JSONNode *config_node_ptr = (*configs_node_ptr)[i];
+      if(CheckPointer(config_node_ptr) == POINTER_INVALID) continue;
+
+      string symbol = config_node_ptr["symbol"].ToString();
+      string timeframe = config_node_ptr["timeframe"].ToString();
+
+      if(symbol == "" || timeframe == "")
+      {
+         SendErrorResponse(request_id, "Parâmetros inválidos: symbol ou timeframe na config " + IntegerToString(i), response_socket, socket_name);
+         return;
+      }
+
+      ENUM_TIMEFRAMES tf = StringToTimeframe(timeframe);
+      if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+
+      // Processar indicadores
+      JSONNode *indicators_node_ptr = config_node_ptr["indicators"];
+      IndicatorConfig indicators[];
+      int indicator_count = 0;
+      if(CheckPointer(indicators_node_ptr) != POINTER_INVALID)
+      {
+         int ind_size = indicators_node_ptr.Size();
+         for(int j = 0; j < ind_size; j++)
+         {
+            JSONNode *ind_node_ptr = (*indicators_node_ptr)[j];
+            if(CheckPointer(ind_node_ptr) == POINTER_INVALID) continue;
+
+            string ind_type = ind_node_ptr["type"].ToString();
+            int ind_period = (int)ind_node_ptr["period"].ToInteger();
+            if(ind_type == "" || ind_period <= 0) continue;
+
+            ArrayResize(indicators, indicator_count + 1);
+            indicators[indicator_count].type = ind_type;
+            indicators[indicator_count].period = ind_period;
+            indicator_count++;
+         }
+      }
+
+      // Adicionar ao array global g_stream_requests
+      int index = ArraySize(g_stream_requests);
+      ArrayResize(g_stream_requests, index + 1);
+      g_stream_requests[index].symbol = symbol;
+      g_stream_requests[index].timeframe = tf;
+      g_stream_requests[index].request_id = request_id;
+      g_stream_requests[index].last_sent_time = 0;
+
+      ArrayResize(g_stream_requests[index].indicators, indicator_count);
+      for(int j = 0; j < indicator_count; j++)
+      {
+         g_stream_requests[index].indicators[j].type = indicators[j].type;
+         g_stream_requests[index].indicators[j].period = indicators[j].period;
+      }
+
+      config_count++;
+   }
+
+   g_streaming_active = true;
+   if(InpDebugLog) PrintFormat("ZMQ Bridge: Iniciado streaming OHLC+Indicadores, configs=%d", config_count);
+
    JSONNode response;
    response["type"] = "RESPONSE";
    response["request_id"] = request_id;
    response["status"] = "OK";
-   JSONNode tick_data;
-   tick_data["time"] = (long)tick.time;
-   tick_data["bid"] = tick.bid;
-   tick_data["ask"] = tick.ask;
-   tick_data["volume"] = (long)tick.volume;
-   response["tick"] = tick_data;
+   response["message"] = "Streaming OHLC+Indicadores iniciado";
    SendJsonMessage(response, response_socket, socket_name);
 }
+
+//+------------------------------------------------------------------+
+//| Comando STOP_STREAM_OHLC_INDICATORS                             |
+//+------------------------------------------------------------------+
+void HandleStopStreamOHLCIndicatorsCommand(const string request_id, JSONNode &payload, Socket &response_socket, string socket_name)
+{
+   bool found = false;
+   for(int i = ArraySize(g_stream_requests) - 1; i >= 0; i--)
+   {
+      if(g_stream_requests[i].request_id == request_id)
+      {
+         for(int j = i; j < ArraySize(g_stream_requests) - 1; j++)
+         {
+            g_stream_requests[j] = g_stream_requests[j + 1];
+         }
+         ArrayResize(g_stream_requests, ArraySize(g_stream_requests) - 1);
+         found = true;
+      }
+   }
+
+   if(!found)
+   {
+      SendErrorResponse(request_id, "Streaming OHLC+Indicadores não encontrado para request_id", response_socket, socket_name);
+      return;
+   }
+
+   g_streaming_active = ArraySize(g_stream_requests) > 0;
+   if(InpDebugLog) PrintFormat("ZMQ Bridge: Streaming OHLC+Indicadores parado para request_id=%s", request_id);
+
+   JSONNode response;
+   response["type"] = "RESPONSE";
+   response["request_id"] = request_id;
+   response["status"] = "OK";
+   response["message"] = "Streaming OHLC+Indicadores parado";
+   SendJsonMessage(response, response_socket, socket_name);
+}
+//+------------------------------------------------------------------+
+//| Bloco 6 - Funções Principais do EA                              |
+//| - Contém as funções principais do MetaTrader (OnInit, OnDeinit, |
+//|   OnTimer, OnTradeTransaction) e lógica de controle para        |
+//|   processar comandos recebidos via ZMQ.                        |
+//| - Este bloco gerencia o ciclo de vida do EA e a execução de     |
+//|   atualizações de streaming.                                   |
+//| - Observação: Futuro suporte para priorização de respostas      |
+//|   (ticks > dados de mercado > ordens > admin) pode ser          |
+//|   implementado aqui no OnTimer.                                |
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 //| Inicialização do EA                                             |
@@ -1295,23 +1357,20 @@ int OnInit()
    if(!ValidatePorts())
       return(INIT_PARAMETERS_INCORRECT);
 
-   // Bind Admin Socket (ZMQ_DEALER)
-   admin_socket.setIdentity(g_brokerKey); // Define identidade única para o socket DEALER
+   admin_socket.setIdentity(g_brokerKey);
    if(!admin_socket.bind(StringFormat("tcp://*:%d", g_adminPort)))
    {
       PrintFormat("ZmqTraderBridge: Erro ao bind Admin Socket %d. GetLastError(): %d", g_adminPort, GetLastError());
       return(INIT_FAILED);
    }
 
-   // Bind Data Socket (ZMQ_DEALER)
-   data_socket.setIdentity(g_brokerKey); // Define identidade única para o socket DEALER
+   data_socket.setIdentity(g_brokerKey);
    if(!data_socket.bind(StringFormat("tcp://*:%d", g_dataPort)))
    {
       PrintFormat("ZmqTraderBridge: Erro ao bind Data Socket %d. GetLastError(): %d", g_dataPort, GetLastError());
       return(INIT_FAILED);
    }
 
-   // Bind Trade, Live, Streaming Sockets
    if(!trade_socket.bind(StringFormat("tcp://*:%d", g_tradePort)))
    {
       PrintFormat("ZmqTraderBridge: Erro ao bind Trade Socket %d. GetLastError(): %d", g_tradePort, GetLastError());
@@ -1356,7 +1415,6 @@ void OnDeinit(const int reason)
    EventKillTimer();
    g_is_connected = false;
 
-   // Fechar sockets explicitamente com o endereço correto
    admin_socket.disconnect(StringFormat("tcp://*:%d", g_adminPort));
    data_socket.disconnect(StringFormat("tcp://*:%d", g_dataPort));
    trade_socket.disconnect(StringFormat("tcp://*:%d", g_tradePort));
@@ -1373,6 +1431,117 @@ void OnTimer()
 {
    if(!g_is_connected) return;
    CheckIncomingCommands();
+
+   if(g_streaming_active)
+   {
+      JSONNode grouped_msg;
+      bool has_new_data = false;
+      JSONNode data_array;
+
+      for(int i = 0; i < ArraySize(g_stream_requests); i++)
+      {
+         string symbol = g_stream_requests[i].symbol;
+         ENUM_TIMEFRAMES tf = g_stream_requests[i].timeframe;
+         datetime last_sent = g_stream_requests[i].last_sent_time;
+
+         MqlRates rates[];
+         ArrayResize(rates, 1);
+         int copied = CopyRates(symbol, tf, 0, 1, rates);
+         if(copied > 0 && rates[0].time > last_sent)
+         {
+            JSONNode entry;
+            entry["symbol"] = symbol;
+            entry["timeframe"] = EnumToString(tf);
+
+            JSONNode ohlc;
+            ohlc["time"] = (long)rates[0].time;
+            ohlc["open"] = rates[0].open;
+            ohlc["high"] = rates[0].high;
+            ohlc["low"] = rates[0].low;
+            ohlc["close"] = rates[0].close;
+            ohlc["volume"] = (long)rates[0].tick_volume;
+            entry["ohlc"] = ohlc;
+
+            JSONNode indicators_array;
+            for(int j = 0; j < ArraySize(g_stream_requests[i].indicators); j++)
+            {
+               string ind_type = g_stream_requests[i].indicators[j].type;
+               int period = g_stream_requests[i].indicators[j].period;
+               double values[];
+               ArrayResize(values, 1);
+               if(CopyIndicatorBuffer(symbol, tf, ind_type, period, values))
+               {
+                  JSONNode ind;
+                  ind["type"] = ind_type;
+                  ind["period"] = period;
+                  ind["value"] = values[0];
+                  indicators_array.Add(ind);
+               }
+               else
+               {
+                  PrintFormat("ZMQ INDICATOR ERROR: Falha ao obter indicador %s(%d) para %s", ind_type, period, symbol);
+               }
+            }
+            entry["indicators"] = indicators_array;
+
+            data_array.Add(entry);
+            g_stream_requests[i].last_sent_time = rates[0].time;
+            has_new_data = true;
+         }
+      }
+
+      if(has_new_data)
+      {
+         grouped_msg["type"] = "STREAM";
+         grouped_msg["event"] = "OHLC_INDICATOR_UPDATE";
+         grouped_msg["request_id"] = g_stream_requests[0].request_id;
+         grouped_msg["timestamp_mql"] = (long)TimeCurrent();
+         grouped_msg["data"] = data_array;
+
+         if(SendJsonMessage(grouped_msg, live_socket, "Live"))
+         {
+            if(InpDebugLog)
+               PrintFormat("ZMQ Bridge: Enviado OHLC+Indicadores para %d ativos, time=%s", ArraySize(g_stream_requests), TimeToString(TimeCurrent()));
+         }
+      }
+
+      for(int i = 0; i < ArraySize(g_stream_requests); i++)
+      {
+         if(ArraySize(g_stream_requests[i].indicators) > 0) continue;
+
+         string symbol = g_stream_requests[i].symbol;
+         ENUM_TIMEFRAMES tf = g_stream_requests[i].timeframe;
+         datetime last_sent = g_stream_requests[i].last_sent_time;
+
+         MqlRates rates[];
+         ArrayResize(rates, 1);
+         int copied = CopyRates(symbol, tf, 0, 1, rates);
+         if(copied > 0 && rates[0].time > last_sent)
+         {
+            JSONNode stream_msg;
+            stream_msg["type"] = "STREAM";
+            stream_msg["event"] = "OHLC_UPDATE";
+            stream_msg["request_id"] = g_stream_requests[i].request_id;
+            stream_msg["timestamp_mql"] = (long)TimeCurrent();
+
+            JSONNode ohlc;
+            ohlc["time"] = (long)rates[0].time;
+            ohlc["open"] = rates[0].open;
+            ohlc["high"] = rates[0].high;
+            ohlc["low"] = rates[0].low;
+            ohlc["close"] = rates[0].close;
+            ohlc["volume"] = (long)rates[0].tick_volume;
+            stream_msg["ohlc"] = ohlc;
+
+            if(SendJsonMessage(stream_msg, live_socket, "Live"))
+            {
+               g_stream_requests[i].last_sent_time = rates[0].time;
+               if(InpDebugLog)
+                  PrintFormat("ZMQ Bridge: Enviado OHLC para %s, time=%s", symbol, TimeToString(rates[0].time));
+            }
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1380,43 +1549,55 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void CheckIncomingCommands()
 {
-   // Receber mensagens do Admin Socket
    ZmqMsg msg_admin;
    while(admin_socket.recv(msg_admin, ZMQ_DONTWAIT))
    {
       string message_str = msg_admin.getData();
-      if(InpDebugLog) PrintFormat("ZMQ Bridge RX (Admin): %s", message_str);
+      if(InpDebugLog)
+         PrintFormat("ZMQ RX (Admin): %s", message_str);
       JSONNode json_parser;
       if(json_parser.Deserialize(message_str))
+      {
          ProcessCommand(json_parser, admin_socket, "Admin");
+      }
       else
+      {
          Print("ZMQ Bridge ERROR (Admin): Falha ao deserializar JSON: ", message_str);
+      }
    }
 
-   // Receber mensagens do Data Socket
    ZmqMsg msg_data;
    while(data_socket.recv(msg_data, ZMQ_DONTWAIT))
    {
       string message_str = msg_data.getData();
-      if(InpDebugLog) PrintFormat("ZMQ Bridge RX (Data): %s", message_str);
+      if(InpDebugLog)
+         PrintFormat("ZMQ RX (Data): %s", message_str);
       JSONNode json_parser;
       if(json_parser.Deserialize(message_str))
+      {
          ProcessCommand(json_parser, data_socket, "Data");
+      }
       else
+      {
          Print("ZMQ Bridge ERROR (Data): Falha ao deserializar JSON: ", message_str);
+      }
    }
 
-   // Receber mensagens do Trade Socket
    ZmqMsg msg_trade;
    while(trade_socket.recv(msg_trade, ZMQ_DONTWAIT))
    {
       string message_str = msg_trade.getData();
-      if(InpDebugLog) PrintFormat("ZMQ Bridge RX (Trade): %s", message_str);
+      if(InpDebugLog)
+         PrintFormat("ZMQ RX (Trade): %s", message_str);
       JSONNode json_parser;
       if(json_parser.Deserialize(message_str))
+      {
          ProcessCommand(json_parser, live_socket, "Live");
+      }
       else
+      {
          Print("ZMQ Bridge ERROR (Trade): Falha ao deserializar JSON: ", message_str);
+      }
    }
 }
 
@@ -1425,111 +1606,186 @@ void CheckIncomingCommands()
 //+------------------------------------------------------------------+
 void ProcessCommand(JSONNode &json_command, Socket &response_socket, string socket_name)
 {
-   JSONNode *cmd_node = json_command["command"];
-   JSONNode *reqid_node = json_command["request_id"];
-   if(CheckPointer(cmd_node) == POINTER_INVALID || CheckPointer(reqid_node) == POINTER_INVALID)
+   JSONNode *cmd_node_ptr = json_command["command"];
+   JSONNode *reqid_node_ptr = json_command["request_id"];
+   if(CheckPointer(cmd_node_ptr) == POINTER_INVALID || CheckPointer(reqid_node_ptr) == POINTER_INVALID)
    {
       SendErrorResponse("", "Comando sem 'command' ou 'request_id'", response_socket, socket_name);
       return;
    }
-   string command = cmd_node.ToString();
-   string request_id = reqid_node.ToString();
+
+   string command = cmd_node_ptr.ToString();
+   string request_id = reqid_node_ptr.ToString();
    JSONNode *payload_node_ptr = json_command["payload"];
-   JSONNode payload = CheckPointer(payload_node_ptr) != POINTER_INVALID ? *payload_node_ptr : JSONNode();
+   JSONNode payload = (CheckPointer(payload_node_ptr) != POINTER_INVALID) ? *payload_node_ptr : JSONNode();
 
    if(command == "PING")
+   {
       HandlePingCommand(request_id, payload_node_ptr, response_socket, socket_name);
+   }
    else if(command == "GET_STATUS_INFO")
+   {
       HandleGetStatusInfoCommand(request_id, payload_node_ptr, response_socket, socket_name);
+   }
    else if(command == "GET_BROKER_INFO")
+   {
       HandleGetBrokerInfoCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_BROKER_SERVER")
+   {
       HandleGetBrokerServerCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_BROKER_PATH")
+   {
       HandleGetBrokerPathCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_INFO")
+   {
       HandleGetAccountInfoCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_BALANCE")
+   {
       HandleGetAccountBalanceCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_LEVERAGE")
+   {
       HandleGetAccountLeverageCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_FLAGS")
+   {
       HandleGetAccountFlagsCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_MARGIN")
+   {
       HandleGetAccountMarginCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_ACCOUNT_STATE")
+   {
       HandleGetAccountStateCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "GET_TIME_SERVER")
+   {
       HandleGetTimeServerCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "POSITIONS")
+   {
       HandleGetPositionsCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "ORDERS")
+   {
       HandleGetOrdersCommand(request_id, response_socket, socket_name);
+   }
    else if(command == "HISTORY_DATA")
+   {
       HandleGetHistoryDataCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "HISTORY_TRADES")
+   {
       HandleGetHistoryTradesCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_BUY")
+   {
       HandleTradeBuyCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_SELL")
+   {
       HandleTradeSellCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_BUY_LIMIT")
+   {
       HandleTradeBuyLimitCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_SELL_LIMIT")
+   {
       HandleTradeSellLimitCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_BUY_STOP")
+   {
       HandleTradeBuyStopCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_TYPE_SELL_STOP")
+   {
       HandleTradeSellStopCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_POSITION_MODIFY")
+   {
       HandleTradePositionModifyCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_POSITION_PARTIAL")
+   {
       HandleTradePositionPartialCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_POSITION_CLOSE_ID")
+   {
       HandleTradePositionCloseIdCommand(request_id, payload, response_socket, socket_name);
-   else if(command == "TRADE_POSITION_CLOSE_SYMBOL")
+   }
+   else if(command == "TRADE_POSITION_CLOSE")
+   {
       HandleTradePositionCloseSymbolCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_MODIFY")
+   {
       HandleTradeOrderModifyCommand(request_id, payload, response_socket, socket_name);
+   }
    else if(command == "TRADE_ORDER_CANCEL")
+   {
       HandleTradeOrderCancelCommand(request_id, payload, response_socket, socket_name);
-   else if(command == "GET_INDICATOR_MA") // Novo comando para Média Móvel
+   }
+   else if(command == "GET_INDICATOR_MA")
+   {
       HandleGetIndicatorMACommand(request_id, payload, response_socket, socket_name);
-   else if(command == "GET_OHLC") // Novo comando para OHLC
+   }
+   else if(command == "GET_OHLC")
+   {
       HandleGetOHLCCommand(request_id, payload, response_socket, socket_name);
-   else if(command == "GET_TICK") // Novo comando para Tick
+   }
+   else if(command == "GET_TICK")
+   {
       HandleGetTickCommand(request_id, payload, response_socket, socket_name);
+   }
+   else if(command == "START_STREAM_OHLC")
+   {
+      HandleStartStreamOHLCCommand(request_id, payload, response_socket, socket_name);
+   }
+   else if(command == "STOP_STREAM")
+   {
+      HandleStopStreamCommand(request_id, payload, response_socket, socket_name);
+   }
+   else if(command == "START_STREAM_OHLC_INDICATORS")
+   {
+      HandleStartStreamOHLCIndicatorsCommand(request_id, payload, response_socket, socket_name);
+   }
+   else if(command == "STOP_STREAM_OHLC_INDICATORS")
+   {
+      HandleStopStreamOHLCIndicatorsCommand(request_id, payload, response_socket, socket_name);
+   }
    else
+   {
       SendErrorResponse(request_id, "Comando desconhecido: " + command, response_socket, socket_name);
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Evento de transação de trading (Streaming Socket)               |
+//| Evento de transação de trading                                  |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeRequest &request,
-                        const MqlTradeResult &result)
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
-   // Ignorar transações irrelevantes silenciosamente
    if(result.retcode == 0 || result.retcode == TRADE_RETCODE_NO_CHANGES)
    {
-      return; // Não logar retcode=0 ou TRADE_RETCODE_NO_CHANGES
+      return;
    }
 
-   // Log detalhado para transações relevantes
    if(InpDebugLog)
    {
       PrintFormat("ZmqTraderBridge DEBUG: OnTradeTransaction - action=%s, retcode=%d, deal=%lld, order=%lld, symbol=%s, volume=%.2f",
                   EnumToString(request.action), result.retcode, result.deal, result.order, request.symbol, request.volume);
    }
 
-   // Criar mensagem JSON para transações válidas
    JSONNode stream_msg;
    stream_msg["type"] = "STREAM";
-   stream_msg["event"] = "TRADE_TRANSACTION";
+   stream_msg["event"] = "TRADE_EVENT";
    stream_msg["timestamp_mql"] = (long)TimeCurrent();
 
-   // Dados da requisição
    JSONNode request_data;
    request_data["action"] = EnumToString(request.action);
    request_data["order"] = (long)request.order;
@@ -1539,13 +1795,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    request_data["sl"] = request.sl;
    request_data["tp"] = request.tp;
    request_data["deviation"] = (long)request.deviation;
-   request_data["type"] = EnumToString(request.type);
-   request_data["type_filling"] = EnumToString(request.type_filling);
-   request_data["type_time"] = EnumToString(request.type_time);
+   request_data["type"] = (int)request.type;
+   request_data["type_filling"] = (int)request.type_filling;
+   request_data["type_time"] = (int)request.type_time;
    request_data["comment"] = request.comment == "" ? NULL : request.comment;
    stream_msg["request"] = request_data;
 
-   // Dados do resultado
    JSONNode result_data;
    result_data["retcode"] = (long)result.retcode;
    result_data["result"] = result.retcode == TRADE_RETCODE_DONE ? "TRADE_RETCODE_DONE" :
@@ -1558,7 +1813,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    result_data["comment"] = result.comment == "" ? NULL : result.comment;
    stream_msg["result"] = result_data;
 
-   // Enviar mensagem apenas para retcodes relevantes
    if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_REJECT ||
       result.retcode == TRADE_RETCODE_INVALID || result.retcode == TRADE_RETCODE_INVALID_PRICE)
    {
@@ -1572,36 +1826,3 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       PrintFormat("ZmqTraderBridge DEBUG: Não enviando mensagem de streaming para retcode=%d", result.retcode);
    }
 }
-
-//+------------------------------------------------------------------+
-//| Conversão de string para timeframe                              |
-//+------------------------------------------------------------------+
-ENUM_TIMEFRAMES StringToTimeframe(string tf)
-{
-   if(tf == "M1") return PERIOD_M1;
-   if(tf == "M5") return PERIOD_M5;
-   if(tf == "M15") return PERIOD_M15;
-   if(tf == "M30") return PERIOD_M30;
-   if(tf == "H1") return PERIOD_H1;
-   if(tf == "H4") return PERIOD_H4;
-   if(tf == "D1") return PERIOD_D1;
-   if(tf == "W1") return PERIOD_W1;
-   if(tf == "MN1") return PERIOD_MN1;
-   return PERIOD_CURRENT;
-}
-
-//+------------------------------------------------------------------+
-//| ZmqTraderBridge.mq5 - Versão 1.0.9.e - GROK                     |
-//| - admin_socket (15560, ZMQ_DEALER): Recebe comandos e envia respostas administrativas (PING, POSITIONS, etc.) |
-//| - data_socket (15561, ZMQ_DEALER): Recebe comandos e envia respostas de dados (GET_OHLC, GET_TICK, GET_INDICATOR_MA) |
-//| - trade_socket (15564, ZMQ_SUB): Recebe comandos de trade       |
-//| - live_socket (15562, ZMQ_PUB): Envia respostas de trade        |
-//| - stream_socket (15563, ZMQ_PUB): Envia eventos de OnTradeTransaction |
-//| Configure portas únicas por instância em MQL5/Files/config.ini  |
-//| Alterações (Envio 7):                                          |
-//| - Alterado data_socket de ZMQ_PUB para ZMQ_DEALER para suportar recebimento de comandos |
-//| - Adicionado setIdentity para data_socket                      |
-//| - Adicionado recebimento de mensagens em data_socket em CheckIncomingCommands() |
-//| - Adicionados logs para mensagens recebidas na DataPort        |
-//| - Mantidas todas as funcionalidades de AdminPort, TradePort, LivePort e StreamPort |
-//+------------------------------------------------------------------+
