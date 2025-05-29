@@ -248,7 +248,7 @@ class BrokerManager:
 
     def copy_expert(self, instance_path):
         r"""Copia o Expert Advisor para a pasta MQL5\Experts da instância."""
-        source_expert_path = os.path.join(self.root_path, "experts", "mt5_zmq_trader.ex5")
+        source_expert_path = os.path.join(self.root_path, "mt5_ea", "ZmqTraderBridge.ex5")
         dest_expert_path = os.path.join(instance_path, "MQL5", "Experts")
         if not os.path.exists(dest_expert_path):
             os.makedirs(dest_expert_path)
@@ -392,4 +392,4 @@ class BrokerManager:
         """
         return [key for key, connected in self.connected_brokers.items() if connected]
 
-#versão 1.0.9.a - envio 1
+#versão 1.0.9.g - envio 1
