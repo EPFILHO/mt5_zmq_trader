@@ -71,9 +71,14 @@ class InternetMonitor:
         if self.running:
             self.running = False
             if self.monitor_thread and self.monitor_thread.is_alive():
-                self.monitor_thread.join(timeout=5)  # Aumentando o timeout para 5 segundos
+                self.monitor_thread.join(timeout=7)  # Aumentado para 7 segundos
                 if self.monitor_thread.is_alive():
-                    logging.warning("Thread de InternetMonitor não terminou após join")
+                    logging.debug("Thread de InternetMonitor ainda ativa, tentando join adicional")
+                    self.monitor_thread.join(timeout=1)  # Segunda tentativa com 1 segundo
+                    if self.monitor_thread.is_alive():
+                        logging.warning("Thread de InternetMonitor não terminou após join adicional")
+                    else:
+                        logging.info("Thread de InternetMonitor encerrada com sucesso após join adicional")
                 else:
                     logging.info("Thread de InternetMonitor encerrada com sucesso")
             logging.info("InternetMonitor parado")
@@ -113,4 +118,4 @@ class InternetMonitor:
         except Exception as e:
             logging.warning(f"Erro ao atualizar status na GUI: {e}")
 
-# Versão 1.0.0 - envio 21 - Monitor de Internet, CPU e Memória
+# Versão 1.0.9.i - envio 1 - Alteração de Término (join)
