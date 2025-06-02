@@ -1,5 +1,5 @@
 # main.py
-# Versão 1.0.9.i - envio 8
+# Versão 1.0.9.i - envio 8 - CORES
 # Ajustes:
 # - CORREÇÃO CRÍTICA: Ajustada a ordem de inicialização e passagem de dependências
 #   entre ZmqRouter e BrokerManager para resolver a dependência circular.
@@ -132,18 +132,20 @@ class ColoredFormatter(logging.Formatter):
     baseado no nível de log.
     """
     # Códigos de escape ANSI para cores
-    GREY = "\x1b[38;20m"    # DEBUG
-    BLUE = "\x1b[34;20m"    # INFO (usado para INFO, mas pode ser verde)
-    YELLOW = "\x1b[33;20m"  # WARNING
+    GREY = "\x1b[38;20m"    # NONE
+    BLUE = "\x1b[34;20m"    # DEBUG
+    YELLOW = "\x1b[33;20m"  # NONE
     RED = "\x1b[31;20m"     # ERROR
     BOLD_RED = "\x1b[31;1m" # CRITICAL
-    GREEN = "\x1b[32;20m"   # INFO (cor sugerida pelo usuário)
+    GREEN = "\x1b[32;20m"   # NONE
     RESET = "\x1b[0m"       # Reseta a cor
+    LIME = "\x1b[92m"  # INFO (verde limão)
+    FUCHSIA = "\x1b[95m"  # WARNING (fúcsia)
 
     FORMATS = {
         logging.DEBUG: BLUE + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
-        logging.INFO: GREEN + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
-        logging.WARNING: YELLOW + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
+        logging.INFO: LIME + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
+        logging.WARNING: FUCHSIA + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
         logging.ERROR: RED + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET,
         logging.CRITICAL: BOLD_RED + "%(asctime)s - %(levelname)s - %(filename)s - %(message)s" + RESET
     }
@@ -422,4 +424,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
 # main.py
-# Versão 1.0.9.i - envio 8
+# Versão 1.0.9.i - envio 8 - CORES
