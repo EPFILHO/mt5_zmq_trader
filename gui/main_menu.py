@@ -1,9 +1,9 @@
 # gui/main_menu.py
-# Versão 1.0.9.b - envio 7
+# Versão 1.0.9.i - envio 1
 # Ajustes:
-# - Adicionada ação "Boleta de Trades" no menu "Ferramentas" para abrir BoletaTraderGui
-# - Criado método open_boleta_window, semelhante a open_status_window, open_commands_window e open_trader_window
-# - Mantidas todas as funcionalidades existentes (Configurações, Conexões, Sair, Trader GUI)
+# - (1.0.9.b): Adicionada ação "Boleta de Trades" no menu "Ferramentas" para abrir BoletaTraderGui.
+# - (1.0.9.i): Adicionado mt5_monitor no construtor e passado ao StatusGui em open_status_window.
+# - [FIX 2] Remove o argumento 'key' das chamadas a _populate_broker_tabs da BoletaTraderGui.
 
 import logging
 from PySide6.QtWidgets import QMenu, QMessageBox, QMenuBar
@@ -11,25 +11,25 @@ from PySide6.QtCore import Slot, QCoreApplication
 from gui.brokers_dialog import BrokersDialog
 from gui.commands_dialog import CommandsDialog
 from gui.status_gui import StatusGui
-from gui.mt5_trader_gui import MT5TraderGui  # Importe o MT5TraderGui
-from gui.boleta_trader_gui import BoletaTraderGui  # Importe o BoletaTraderGui
+from gui.mt5_trader_gui import MT5TraderGui
+from gui.boleta_trader_gui import BoletaTraderGui
 
 logger = logging.getLogger(__name__)
 
-
 class MainMenu:
-    def __init__(self, main_window, config, broker_manager, zmq_router):
+    def __init__(self, main_window, config, broker_manager, zmq_router, mt5_monitor):
         self.main_window = main_window
         self.config = config
         self.broker_manager = broker_manager
         self.zmq_router = zmq_router
+        self.mt5_monitor = mt5_monitor  # Novo: armazenar mt5_monitor
         self.menubar = QMenuBar()
         self.conn_menu = None
         self._brokers_dialog = None
         self._commands_dialog = None
         self._status_dialog = None
-        self._trader_dialog = None  # Adicionado para MT5TraderGui
-        self._boleta_dialog = None  # Adicionado para BoletaTraderGui
+        self._trader_dialog = None
+        self._boleta_dialog = None
         self._create_menus()
         logger.info("Classe MainMenu inicializada.")
 
@@ -97,7 +97,7 @@ class MainMenu:
         """Abre a janela de status das corretoras."""
         if self._status_dialog is None:
             self._status_dialog = StatusGui(self.config, self.broker_manager, self.zmq_router,
-                                            self.main_window.zmq_message_handler, self.main_window)
+                                            self.main_window.zmq_message_handler, self.main_window, self.mt5_monitor)
         self._status_dialog.show()
         self._status_dialog.raise_()
         self._status_dialog.activateWindow()
@@ -164,9 +164,10 @@ class MainMenu:
             if hasattr(self, "_status_dialog") and self._status_dialog is not None:
                 self._status_dialog.update_status()
             if hasattr(self, "_trader_dialog") and self._trader_dialog is not None:
-                self._trader_dialog._populate_brokers()  # Atualiza MT5TraderGui
+                self._trader_dialog._populate_brokers()
+            # [FIX 2] Remove o argumento 'key' da chamada. A seleção será tratada no _on_broker_status_updated.
             if hasattr(self, "_boleta_dialog") and self._boleta_dialog is not None:
-                self._boleta_dialog._populate_broker_tabs()  # Atualiza BoletaTraderGui
+                self._boleta_dialog._populate_broker_tabs()
         else:
             logger.error(f"Falha ao conectar corretora: {key}")
 
@@ -181,11 +182,12 @@ class MainMenu:
             if hasattr(self, "_status_dialog") and self._status_dialog is not None:
                 self._status_dialog.update_status()
             if hasattr(self, "_trader_dialog") and self._trader_dialog is not None:
-                self._trader_dialog._populate_brokers()  # Atualiza MT5TraderGui
+                self._trader_dialog._populate_brokers()
+            # [FIX 2] Remove o argumento 'key' da chamada. A seleção será tratada no _on_broker_status_updated.
             if hasattr(self, "_boleta_dialog") and self._boleta_dialog is not None:
-                self._boleta_dialog._populate_broker_tabs()  # Atualiza BoletaTraderGui
+                self._boleta_dialog._populate_broker_tabs()
         else:
             logger.error(f"Falha ao desconectar corretora: {key}")
 
 # ------------ término do arquivo gui/main_menu.py ------------
-# Versão 1.0.9.b - envio 7
+# Versão 1.0.9.i - envio 1
