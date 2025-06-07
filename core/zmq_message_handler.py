@@ -1,14 +1,16 @@
-# core/zmq_message_handler.py
-# Versão 1.0.9.k - Envio 8
+# Arquivo: core/zmq_message_handler.py
+# Versão: 1.0.9.k - Envio 4
+# Objetivo: Manipular e rotear mensagens ZMQ recebidas do Expert Advisor (EA) para a aplicação Python.
 # Ajustes:
-# - Adicionado suporte ao evento OHLC_INDICATOR_UPDATE com sinal stream_ohlc_indicators_received.
-# - Mantido o fallback para chave vazia "" em OHLC_UPDATE.
-# - Todas as funcionalidades anteriores preservadas (de 1.0.9.j):
-#   - Correção de OHLC_UPDATE com fallback message.get("", {}).
-#   - Sinais para START_STREAM_OHLC, STOP_STREAM, OHLC_UPDATE.
-#   - Suporte a GET_OHLC, GET_TICK, indicator_ma_received, etc.
-# - Alinhado com ZmqTraderBridge 1.10, MT5TraderGui 1.0.9.g, ZmqRouter 1.0.9.b.
+# - Código reorganizado em blocos modulares para melhor organização e manutenção.
+# - Comentários detalhados adicionados para cada bloco e função.
+# - [FIX 1] Adicionado sinal trade_event_received e tratamento para mensagens STREAM/TRADE_EVENT.
+# - [FIX 2] Corrigida a extração dos dados de 'request' e 'result' para o evento TRADE_EVENT,
+#           considerando a estrutura real da mensagem recebida do EA (dados sob a chave vazia '').
 
+# Bloco 1 - Importações e Configuração Inicial
+# Objetivo: Importar bibliotecas necessárias e configurar o logging para depuração e monitoramento.
+# Este bloco define as dependências do sistema e o formato de logs para rastrear eventos e erros.
 import logging
 import time
 import asyncio
@@ -16,7 +18,17 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 logger = logging.getLogger(__name__)
 
+# Buffer global para armazenar o último estado do trade_allowed por corretora.
+# Usado para que a GUI de status possa consultar o estado de algotrading de cada corretora.
+trade_allowed_states = {}
+
+
+# Bloco 2 - Definição da Classe ZmqMessageHandler
+# Objetivo: Definir a classe principal para manipulação de mensagens ZMQ, seus sinais e inicializar atributos.
+# Esta classe atua como um "tradutor" de mensagens do EA para a aplicação Python, emitindo sinais
+# específicos para diferentes tipos de dados e eventos.
 class ZmqMessageHandler(QObject):
+    # Sinais emitidos para a interface do usuário ou outros componentes da aplicação.
     log_message_received = Signal(str)
     ping_button_state_changed = Signal(bool)
     broker_info_received = Signal(dict)
@@ -37,28 +49,53 @@ class ZmqMessageHandler(QObject):
     ohlc_received = Signal(dict)
     tick_received = Signal(dict)
     stream_ohlc_received = Signal(dict)
-    stream_ohlc_indicators_received = Signal(dict)  # NOVO: Sinal para OHLC com indicadores
+    stream_ohlc_indicators_received = Signal(dict)
+    trade_allowed_update_received = Signal(dict)
+    trade_event_received = Signal(dict)  # [FIX 1] Novo sinal para eventos de trade (operações de mercado)
 
     def __init__(self, config, zmq_router, parent=None):
+        """
+        Inicializa o manipulador de mensagens ZMQ.
+
+        Args:
+            config: Instância do gerenciador de configurações.
+            zmq_router: Instância do roteador ZMQ para comunicação.
+            parent: Widget pai (opcional, padrão None).
+        """
         super().__init__(parent)
         self.config = config
         self.zmq_router = zmq_router
-        self.main_window = parent
-        self.heartbeat_active = {}
+        self.main_window = parent  # Referência à janela principal para acesso a outros componentes.
+        self.heartbeat_active = {}  # Dicionário para rastrear o status do heartbeat por corretora.
 
+    # Bloco 3 - Manipulação de Mensagens ZMQ (`handle_zmq_message`)
+    # Objetivo: Receber, decodificar e rotear mensagens ZMQ para os sinais e componentes apropriados.
+    # Este é o método central que processa todas as mensagens recebidas do Expert Advisor (EA).
     @Slot(bytes, object)
     async def handle_zmq_message(self, client_id_bytes: bytes, message: dict):
+        """
+        Processa uma mensagem ZMQ recebida do Expert Advisor.
+
+        Args:
+            client_id_bytes (bytes): O ID ZMQ do cliente (EA) que enviou a mensagem.
+            message (dict): O dicionário da mensagem JSON recebida.
+        """
+        global trade_allowed_states  # Acessa o buffer global de estados de trade_allowed.
+
+        # Identifica a chave da corretora associada ao client_id_bytes.
         client_id_hex = client_id_bytes.hex()
         identified_broker_key = None
         for key, zid in self.zmq_router._clients.items():
             if zid == client_id_bytes:
                 identified_broker_key = key
                 break
+        # Se não encontrado pelo ID ZMQ, tenta obter do próprio corpo da mensagem.
         if not identified_broker_key:
             identified_broker_key = message.get("broker_key")
 
         log_prefix = f"ZMQ RX [{identified_broker_key or client_id_hex}]:"
 
+        # Loga a mensagem, exceto para TICKs que podem ser muito frequentes.
         if message.get("event") != "TICK":
             log_message = f"{log_prefix} {message}"
             self.log_message_received.emit(log_message)
@@ -70,12 +107,13 @@ class ZmqMessageHandler(QObject):
         event = message.get("event")
         status = message.get("status")
 
+        # Sub-bloco 3.1 - Eventos de Sistema (REGISTER, CLIENT_UNREGISTERED)
         if msg_type == "SYSTEM" and event == "REGISTER":
             broker_key_from_msg = message.get("broker_key")
             if broker_key_from_msg:
                 self.log_message_received.emit(f"INFO: Corretora {broker_key_from_msg} registrada.")
                 logger.info(f"Corretora {broker_key_from_msg} registrada.")
-                self.ping_button_state_changed.emit(True)
+                self.ping_button_state_changed.emit(True)  # Sinaliza que o botão PING pode ser habilitado.
                 self.heartbeat_active[broker_key_from_msg] = True
             else:
                 logger.warning(f"Registro sem broker_key de {client_id_hex}")
@@ -85,12 +123,15 @@ class ZmqMessageHandler(QObject):
             if unregistered_key:
                 self.log_message_received.emit(f"INFO: Corretora {unregistered_key} desconectada.")
                 logger.info(f"Corretora {unregistered_key} desconectada.")
-                self.ping_button_state_changed.emit(False)
+                self.ping_button_state_changed.emit(False)  # Sinaliza que o botão PING deve ser desabilitado.
                 if unregistered_key in self.heartbeat_active:
                     del self.heartbeat_active[unregistered_key]
+                if unregistered_key in trade_allowed_states:  # Remover do buffer ao desregistrar.
+                    del trade_allowed_states[unregistered_key]
             else:
                 logger.warning(f"Desregistro sem broker_key de {client_id_hex}")
 
+        # Sub-bloco 3.2 - Eventos de Stream (HEARTBEAT, OHLC, Indicadores, Trade Allowed, Trade Event)
         elif msg_type == "EVENT" and event == "HEARTBEAT":
             broker_key_hb = message.get("broker_key")
             if broker_key_hb:
@@ -102,7 +143,7 @@ class ZmqMessageHandler(QObject):
 
         elif msg_type == "STREAM" and event == "OHLC_UPDATE":
             stream_data = {
-                "ohlc": message.get("ohlc", message.get("", {})),  # Fallback para chave vazia
+                "ohlc": message.get("ohlc", message.get("", {})),  # Fallback para chave vazia.
                 "broker_key": identified_broker_key,
                 "request_id": message.get("request_id", ""),
                 "timestamp_mql": message.get("timestamp_mql", 0)
@@ -110,7 +151,7 @@ class ZmqMessageHandler(QObject):
             self.stream_ohlc_received.emit(stream_data)
             logger.info(f"Emitido stream_ohlc_received: {stream_data}")
 
-        elif msg_type == "STREAM" and event == "OHLC_INDICATOR_UPDATE":  # NOVO: Processamento do novo evento
+        elif msg_type == "STREAM" and event == "OHLC_INDICATOR_UPDATE":
             data = message.get("data", [])
             for entry in data:
                 stream_data = {
@@ -125,6 +166,31 @@ class ZmqMessageHandler(QObject):
                 self.stream_ohlc_indicators_received.emit(stream_data)
                 logger.info(f"Emitido stream_ohlc_indicators_received para {stream_data['symbol']}: {stream_data}")
 
+        elif msg_type == "STREAM" and event == "TRADE_ALLOWED_UPDATE":
+            stream_data = {
+                "trade_allowed": message.get("trade_allowed", None),
+                "broker_key": identified_broker_key,
+                "timestamp_mql": message.get("timestamp_mql", 0)
+            }
+            if identified_broker_key and stream_data["trade_allowed"] is not None:  # Atualiza o buffer global.
+                trade_allowed_states[identified_broker_key] = stream_data["trade_allowed"]
+            self.trade_allowed_update_received.emit(stream_data)
+            logger.info(f"Emitido trade_allowed_update_received: {stream_data}")
+
+        # [FIX 1, 2] Tratamento para eventos de trade via stream.
+        elif msg_type == "STREAM" and event == "TRADE_EVENT":
+            # O log indica que o dicionário de resultado da operação está sob a chave vazia ''.
+            # A parte 'request' pode estar ausente ou também sob a chave 'request', dependendo do EA.
+            trade_event_data = {
+                "broker_key": identified_broker_key,
+                "timestamp_mql": message.get("timestamp_mql", 0),
+                "request": message.get("request", {}),  # Assume 'request' está sob a chave 'request' se presente.
+                "result": message.get("", {})  # Assume o conteúdo da chave vazia '' é o dicionário de resultado.
+            }
+            self.trade_event_received.emit(trade_event_data)
+            logger.info(f"Emitido trade_event_received: {trade_event_data}")
+
+        # Sub-bloco 3.3 - Respostas a Comandos (RESPONSE)
         elif msg_type == "RESPONSE":
             request_id = message.get("request_id", "")
             status = message.get("status")
@@ -261,7 +327,8 @@ class ZmqMessageHandler(QObject):
                         "broker_key": identified_broker_key
                     }
                     self.positions_received.emit(positions)
-                    logger.info(f"Emitido positions_received com {len(positions_data)} ordens para {identified_broker_key}.")
+                    logger.info(
+                        f"Emitido positions_received com {len(positions_data)} ordens para {identified_broker_key}.")
                 else:
                     error = message.get("error_message", "Erro desconhecido")
                     self.log_message_received.emit(f"ERROR: Falha ao obter posições: {error}")
@@ -398,7 +465,15 @@ class ZmqMessageHandler(QObject):
                         f"ERROR: Resposta de {identified_broker_key or client_id_hex}: {error}")
                     logger.error(f"Resposta ERROR desconhecida: {message}")
 
+    # Bloco 4 - Funções de Envio de Comandos
+    # Objetivo: Fornecer métodos para enviar comandos específicos ao Expert Advisor (EA) via ZMQ.
     def send_ping(self, broker_key: str):
+        """
+        Envia um comando PING para o Expert Advisor da corretora especificada.
+
+        Args:
+            broker_key (str): A chave da corretora para a qual enviar o PING.
+        """
         timestamp = time.time()
         payload = {"timestamp": timestamp}
         self.log_message_received.emit(f"INFO: Enviando PING para {broker_key}...")
@@ -407,6 +482,12 @@ class ZmqMessageHandler(QObject):
         ))
 
     def send_get_status_info(self, broker_key: str):
+        """
+        Envia um comando GET_STATUS_INFO para o Expert Advisor da corretora especificada.
+
+        Args:
+            broker_key (str): A chave da corretora para a qual solicitar informações de status.
+        """
         timestamp = time.time()
         payload = {"timestamp": timestamp}
         self.log_message_received.emit(f"INFO: Enviando GET_STATUS_INFO para {broker_key}...")
@@ -414,5 +495,16 @@ class ZmqMessageHandler(QObject):
             broker_key, "GET_STATUS_INFO", payload, request_id=f"get_status_info_{broker_key}_{int(timestamp)}"
         ))
 
-# ------------ término do arquivo zmq_message_handler.py ------------
-# Versão 1.0.9.f - Envio 8
+    # Bloco 5 - Funções Auxiliares
+    # Objetivo: Fornecer métodos auxiliares para a manipulação de dados e estados.
+    def get_trade_allowed_states(self):
+        """
+        Retorna uma cópia do buffer global de estados de trade_allowed.
+
+        Returns:
+            dict: Um dicionário contendo o status de trade_allowed para cada corretora.
+        """
+        return trade_allowed_states.copy()
+
+# Arquivo: core/zmq_message_handler.py
+# Versão: 1.0.9.k - Envio 4
