@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EPFilho"
 #property link      "epfilho73@gmail.com"
-#property version   "1.11"
+#property version   "1.14"
 #property strict
 
 #include <Zmq/Zmq.mqh>
@@ -37,6 +37,10 @@ bool    g_is_connected = false;
 datetime g_last_ping_time = 0;
 long    g_ping_latency = 0;
 CTrade  trade;
+//--- Variáveis para monitoramento de trade_allowed
+bool g_last_trade_allowed = false;
+//--- Controle do envio inicial do TRADE_ALLOWED_UPDATE
+bool g_initial_trade_allowed_sent = false;
 
 //--- Estruturas para streaming
 struct IndicatorConfig {
@@ -278,20 +282,11 @@ void HandlePingCommand(const string request_id, JSONNode *payload_node_ptr, Sock
 void HandleGetStatusInfoCommand(const string request_id, JSONNode *payload_node_ptr, Socket &response_socket, string socket_name)
 {
    if(InpDebugLog) Print("ZMQ Bridge: Recebido comando GET_STATUS_INFO.");
-   long original_timestamp = 0;
-   if(CheckPointer(payload_node_ptr) != POINTER_INVALID)
-   {
-      JSONNode *ts_node_ptr = (*payload_node_ptr)["timestamp"];
-      if(CheckPointer(ts_node_ptr) != POINTER_INVALID)
-         original_timestamp = ts_node_ptr.ToInteger();
-   }
    JSONNode response;
    response["type"] = "RESPONSE";
    response["request_id"] = request_id;
    response["status"] = "OK";
    response["trade_allowed"] = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
-   response["balance"] = AccountInfoDouble(ACCOUNT_BALANCE);
-   response["original_timestamp"] = original_timestamp;
    response["pong_timestamp_mql"] = (long)TimeCurrent();
    SendJsonMessage(response, response_socket, socket_name);
 }
@@ -1393,6 +1388,7 @@ int OnInit()
    g_is_connected = true;
    if(!SendRegisterMessage(admin_socket, "Admin"))
       Print("ZmqTraderBridge: Falha ao enviar REGISTER.");
+
    if(!EventSetMillisecondTimer(InpTimerIntervalMs))
    {
       Print("ZmqTraderBridge: Erro ao iniciar Timer! GetLastError():", GetLastError());
@@ -1401,6 +1397,8 @@ int OnInit()
    }
    Print("ZmqTraderBridge: Inicialização concluída.");
    g_last_ping_time = TimeCurrent();
+   // Inicializar g_last_trade_allowed
+   g_last_trade_allowed = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
    return(INIT_SUCCEEDED);
 }
 
@@ -1431,6 +1429,24 @@ void OnTimer()
 {
    if(!g_is_connected) return;
    CheckIncomingCommands();
+
+   // Enviar estado inicial do trade_allowed no primeiro ciclo
+   if(!g_initial_trade_allowed_sent)
+   {
+      bool current_trade_allowed = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+      JSONNode trade_allowed_msg;
+      trade_allowed_msg["type"] = "STREAM";
+      trade_allowed_msg["event"] = "TRADE_ALLOWED_UPDATE";
+      trade_allowed_msg["trade_allowed"] = current_trade_allowed;
+      trade_allowed_msg["timestamp_mql"] = (long)TimeCurrent();
+      if(SendJsonMessage(trade_allowed_msg, live_socket, "Live"))
+      {
+         if(InpDebugLog)
+            PrintFormat("ZMQ Bridge: Enviado TRADE_ALLOWED_UPDATE inicial: %s", current_trade_allowed ? "true" : "false");
+      }
+      g_initial_trade_allowed_sent = true;
+      g_last_trade_allowed = current_trade_allowed;
+   }
 
    if(g_streaming_active)
    {
@@ -1541,6 +1557,23 @@ void OnTimer()
             }
          }
       }
+   }
+
+   // Verificar mudança no trade_allowed
+   bool current_trade_allowed = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+   if(current_trade_allowed != g_last_trade_allowed)
+   {
+      JSONNode trade_allowed_msg;
+      trade_allowed_msg["type"] = "STREAM";
+      trade_allowed_msg["event"] = "TRADE_ALLOWED_UPDATE";
+      trade_allowed_msg["trade_allowed"] = current_trade_allowed;
+      trade_allowed_msg["timestamp_mql"] = (long)TimeCurrent();
+      if(SendJsonMessage(trade_allowed_msg, live_socket, "Live"))
+      {
+         if(InpDebugLog)
+            PrintFormat("ZMQ Bridge: Enviado TRADE_ALLOWED_UPDATE: %s", current_trade_allowed ? "true" : "false");
+      }
+      g_last_trade_allowed = current_trade_allowed;
    }
 }
 
@@ -1826,3 +1859,5 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       PrintFormat("ZmqTraderBridge DEBUG: Não enviando mensagem de streaming para retcode=%d", result.retcode);
    }
 }
+
+// Versão 1.0.9.i - GROK - status_gui.py - trade_allowed
