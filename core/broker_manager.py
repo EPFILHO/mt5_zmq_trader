@@ -1,4 +1,14 @@
 # core/broker_manager.py
+# Versão 1.0.9.j - envio 4
+# Ajustes:
+# - Adicionado suporte ao sinal brokers_updated para notificar mudanças na lista de corretoras
+#   ou status de conexão, garantindo que as abas no BoletaTraderGui sejam reordenadas alfabeticamente.
+# - Transformado BrokerManager em QObject para suportar sinais do Qt.
+# - Emitido brokers_updated nos métodos add_broker, remove_broker, modify_broker, connect_broker,
+#   e disconnect_broker.
+# - Mantidas todas as funcionalidades existentes (gerenciamento de instâncias MT5, ZMQ, etc.).
+# - Alterações mínimas para preservar o comportamento original.
+
 import json
 import os
 import shutil
@@ -6,11 +16,18 @@ import logging
 import subprocess
 import sys
 import configparser
+import asyncio
+from PySide6.QtCore import QObject, Signal  # Adicionado para suportar sinais
 
 logger = logging.getLogger(__name__)
 
-class BrokerManager:
-    def __init__(self, config, base_mt5_path, root_path):
+class BrokerManager(QObject):
+    # Sinal para notificar mudanças na lista de corretoras ou status de conexão
+    brokers_updated = Signal()
+
+    # Bloco 1 - Inicialização da Classe BrokerManager
+    # Objetivo: Inicializar o gerenciador de corretoras, carregar configurações e preparar o ambiente.
+    def __init__(self, config, base_mt5_path, root_path, zmq_router):
         """
         Inicializa o gerenciador de corretoras.
 
@@ -18,7 +35,10 @@ class BrokerManager:
             config (ConfigManager): Instância do gerenciador de configuração.
             base_mt5_path (str): Caminho base do MT5 para criar instâncias portáteis.
             root_path (str): Caminho da raiz do projeto.
+            zmq_router (ZmqRouter): Instância do roteador ZMQ para gerenciar sockets.
         """
+        super().__init__()  # Inicializa QObject
+        logger.debug("Bloco 1 - BrokerManager.__init__ chamado.")
         self.brokers_file = config.get('General', 'brokers_file', fallback='brokers.json')
         self.base_mt5_path = base_mt5_path
         self.root_path = root_path
@@ -26,7 +46,11 @@ class BrokerManager:
         self.brokers = self.load_brokers()
         self.connected_brokers = {}  # Dicionário para rastrear o status de conexão
         self.mt5_processes = {}  # Dicionário para armazenar os processos MT5
+        self.zmq_router = zmq_router
+        logger.debug("Bloco 1 - BrokerManager.__init__ concluído.")
 
+    # Bloco 2 - Gerenciamento de Arquivos de Corretoras (load_brokers, save_brokers)
+    # Objetivo: Carregar e salvar os dados das corretoras em um arquivo JSON.
     def load_brokers(self):
         """Carrega as corretoras do arquivo JSON.
 
@@ -38,10 +62,12 @@ class BrokerManager:
                 with open(self.brokers_file, 'r') as f:
                     brokers = json.load(f)
                     self.connected_brokers = {key: False for key in brokers}
+                    logger.info(f"Bloco 2 - Corretoras carregadas do arquivo: {len(brokers)}.")
                     return brokers
+            logger.info("Bloco 2 - Arquivo de corretoras não encontrado ou vazio. Retornando dicionário vazio.")
             return {}
         except Exception as e:
-            logger.error(f"Erro ao carregar corretoras: {str(e)}")
+            logger.error(f"Bloco 2 - Erro ao carregar corretoras: {str(e)}")
             return {}
 
     def save_brokers(self):
@@ -49,9 +75,12 @@ class BrokerManager:
         try:
             with open(self.brokers_file, 'w') as f:
                 json.dump(self.brokers, f, indent=4)
+            logger.info("Bloco 2 - Corretoras salvas no arquivo.")
         except Exception as e:
-            logger.error(f"Erro ao salvar corretoras: {str(e)}")
+            logger.error(f"Bloco 2 - Erro ao salvar corretoras: {str(e)}")
 
+    # Bloco 3 - Operações CRUD de Corretoras (add_broker, remove_broker, modify_broker)
+    # Objetivo: Adicionar, remover e modificar registros de corretoras, incluindo a criação/remoção de instâncias MT5 portáteis.
     def add_broker(self, name, broker_name, login, password, server,
                    admin_port, data_port, live_port, str_port, trade_port,
                    client="", mode="", type_=""):
@@ -77,7 +106,7 @@ class BrokerManager:
         """
         key = f"{broker_name.upper()}-{login}"
         if key in self.brokers:
-            logger.error(f"Corretora {key} já existe.")
+            logger.error(f"Bloco 3 - Corretora {key} já existe.")
             return None
 
         instance_path = self.setup_portable_instance(key)
@@ -101,11 +130,9 @@ class BrokerManager:
         }
         self.save_brokers()
         self.connected_brokers[key] = False
-
-        # Cria o arquivo config.ini na pasta do MT5
         self.create_mt5_config(key, admin_port, data_port, live_port, str_port, trade_port)
-
-        logger.info(f"Corretora {key} adicionada com sucesso.")
+        logger.info(f"Bloco 3 - Corretora {key} adicionada com sucesso.")
+        self.brokers_updated.emit()  # Emitir sinal
         return key
 
     def remove_broker(self, key):
@@ -118,8 +145,12 @@ class BrokerManager:
             bool: True se removida, False se não encontrada.
         """
         if key not in self.brokers:
-            logger.error(f"Corretora {key} não encontrada.")
+            logger.error(f"Bloco 3 - Corretora {key} não encontrada.")
             return False
+
+        if self.is_connected(key):
+            logger.warning(f"Bloco 3 - Corretora {key} está conectada. Desconectando antes de remover.")
+            self.disconnect_broker(key)
 
         del self.brokers[key]
         self.save_brokers()
@@ -128,8 +159,9 @@ class BrokerManager:
         instance_path = os.path.join(self.instances_dir, key)
         if os.path.exists(instance_path):
             shutil.rmtree(instance_path, ignore_errors=True)
-            logger.info(f"Diretório MT5 de {key} excluído: {instance_path}")
-        logger.info(f"Corretora {key} removida com sucesso.")
+            logger.info(f"Bloco 3 - Diretório MT5 de {key} excluído: {instance_path}")
+        logger.info(f"Bloco 3 - Corretora {key} removida com sucesso.")
+        self.brokers_updated.emit()  # Emitir sinal
         return True
 
     def modify_broker(self, old_key, name, broker_name, login, password, server,
@@ -157,17 +189,19 @@ class BrokerManager:
             str: Nova chave da corretora ou None se falhar.
         """
         if old_key not in self.brokers:
-            logger.error(f"Corretora {old_key} não encontrada.")
+            logger.error(f"Bloco 3 - Corretora {old_key} não encontrada.")
             return None
 
+        if self.is_connected(old_key):
+            logger.warning(f"Bloco 3 - Corretora {old_key} está conectada. Desconectando antes de modificar.")
+            self.disconnect_broker(old_key)
+
         old_data = self.brokers.pop(old_key)
-        # Determina broker_name
         if broker_name is None:
             broker_name = old_data.get("broker_name", old_key.split("-")[0])
         new_key = f"{broker_name.upper()}-{login}"
         if new_key != old_key and new_key in self.brokers:
-            logger.error(f"Já existe uma corretora com a chave {new_key}.")
-            # Restaura o antigo se falhou
+            logger.error(f"Bloco 3 - Já existe uma corretora com a chave {new_key}.")
             self.brokers[old_key] = old_data
             return None
 
@@ -197,13 +231,13 @@ class BrokerManager:
             self.connected_brokers[new_key] = self.connected_brokers.pop(old_key)
         else:
             self.connected_brokers[new_key] = False
-
-        # Cria o arquivo config.ini na pasta do MT5
         self.create_mt5_config(new_key, admin_port, data_port, live_port, str_port, trade_port)
-
-        logger.info(f"Corretora {old_key} modificada para {new_key}.")
+        logger.info(f"Bloco 3 - Corretora {old_key} modificada para {new_key}.")
+        self.brokers_updated.emit()  # Emitir sinal
         return new_key
 
+    # Bloco 4 - Gerenciamento de Instâncias MT5 Portáteis (setup_portable_instance, copy_dlls, copy_expert, create_mt5_config)
+    # Objetivo: Criar, configurar e gerenciar os diretórios das instâncias portáteis do MT5 para cada corretora.
     def setup_portable_instance(self, key):
         """Cria uma instância portátil copiando o diretório base do MT5.
 
@@ -215,7 +249,6 @@ class BrokerManager:
         """
         instance_path = os.path.join(self.instances_dir, key)
         executable = os.path.join(instance_path, "terminal64.exe")
-
         if not os.path.exists(instance_path):
             try:
                 os.makedirs(self.instances_dir, exist_ok=True)
@@ -224,9 +257,9 @@ class BrokerManager:
                 self.copy_expert(instance_path)
                 import win32api, win32con
                 win32api.SetFileAttributes(instance_path, win32con.FILE_ATTRIBUTE_HIDDEN)
-                logger.info(f"Instância MT5 criada para {key} em {instance_path}")
+                logger.info(f"Bloco 4 - Instância MT5 criada para {key} em {instance_path}")
             except Exception as e:
-                logger.error(f"Erro ao criar instância para {key}: {str(e)}")
+                logger.error(f"Bloco 4 - Erro ao criar instância para {key}: {str(e)}")
                 return None
         return executable
 
@@ -242,9 +275,9 @@ class BrokerManager:
                     source_file = os.path.join(source_dll_path, filename)
                     dest_file = os.path.join(dest_dll_path, filename)
                     shutil.copy2(source_file, dest_file)
-                    logger.debug(f"DLL copiada: {filename} para {dest_file}")
+                    logger.debug(f"Bloco 4 - DLL copiada: {filename} para {dest_file}")
         except Exception as e:
-            logger.error(f"Erro ao copiar DLLs: {str(e)}")
+            logger.error(f"Bloco 4 - Erro ao copiar DLLs: {str(e)}")
 
     def copy_expert(self, instance_path):
         r"""Copia o Expert Advisor para a pasta MQL5\Experts da instância."""
@@ -254,9 +287,9 @@ class BrokerManager:
             os.makedirs(dest_expert_path)
         try:
             shutil.copy2(source_expert_path, dest_expert_path)
-            logger.debug(f"Expert Advisor copiado para {dest_expert_path}")
+            logger.debug(f"Bloco 4 - Expert Advisor copiado para {dest_expert_path}")
         except Exception as e:
-            logger.error(f"Erro ao copiar Expert Advisor: {str(e)}")
+            logger.error(f"Bloco 4 - Erro ao copiar Expert Advisor: {str(e)}")
 
     def create_mt5_config(self, key, admin_port, data_port, live_port, str_port, trade_port):
         """
@@ -265,8 +298,6 @@ class BrokerManager:
         """
         instance_path = os.path.join(self.instances_dir, key)
         config_file_path = os.path.join(instance_path, "MQL5", "Files", "config.ini")
-
-        # Monta manualmente o conteúdo do arquivo
         lines = [
             "[ZMQ]",
             f"BrokerKey={key}",
@@ -278,15 +309,17 @@ class BrokerManager:
             f"TradePort={trade_port}"
         ]
         content = "\n".join(lines)
-
         try:
             os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
             with open(config_file_path, 'w', encoding='utf-8') as configfile:
                 configfile.write(content)
-            logger.info(f"Arquivo config.ini criado em {config_file_path}")
+            logger.info(f"Bloco 4 - Arquivo config.ini criado em {config_file_path}")
         except Exception as e:
-            logger.error(f"Erro ao criar o arquivo config.ini: {str(e)}")
+            logger.error(f"Bloco 4 - Erro ao criar o arquivo config.ini: {str(e)}")
 
+    # Bloco 5 - Gerenciamento de Conexão de Corretoras (connect_broker, disconnect_broker, is_connected, get_connected_brokers)
+    # Objetivo: Iniciar e parar os processos MT5 e gerenciar o status de conexão das corretoras,
+    # incluindo a interação com o ZmqRouter para as portas ZMQ.
     def get_brokers(self):
         """Retorna o dicionário de corretoras.
 
@@ -305,21 +338,30 @@ class BrokerManager:
             bool: True se a conexão foi bem-sucedida, False caso contrário.
         """
         if key not in self.brokers:
-            logger.error(f"Corretora {key} não encontrada.")
+            logger.error(f"Bloco 5 - Corretora {key} não encontrada.")
             return False
 
-        if key in self.mt5_processes:
-            logger.warning(f"MT5 já está em execução para a corretora {key}.")
+        process_is_running = False
+        if key in self.mt5_processes and self.mt5_processes[key].poll() is None:
+            process_is_running = True
+
+        if process_is_running:
+            logger.warning(f"Bloco 5 - MT5 já está em execução para a corretora {key}.")
+            if self.zmq_router:
+                broker_config = self.brokers[key]
+                asyncio.create_task(self.zmq_router.connect_broker_sockets(key, broker_config))
+                logger.info(f"Bloco 5 - Tentando reconectar sockets ZMQ para {key}.")
+            self.connected_brokers[key] = True
+            self.brokers_updated.emit()  # Emitir sinal
             return True
 
         instance_path = os.path.join(self.instances_dir, key, "terminal64.exe")
         if not os.path.exists(instance_path):
-            logger.error(f"Instância do MT5 não encontrada para a corretora {key}.")
+            logger.error(f"Bloco 5 - Instância do MT5 não encontrada para a corretora {key}.")
             return False
 
         try:
-            logger.info(f"Iniciando MT5 para a corretora {key} (minimizado)...")
-            # Iniciar minimizado no Windows
+            logger.info(f"Bloco 5 - Iniciando MT5 para a corretora {key} (minimizado)...")
             if sys.platform.startswith("win"):
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -330,17 +372,23 @@ class BrokerManager:
                     startupinfo=si
                 )
             else:
-                # Em outros sistemas, apenas inicia normalmente
                 process = subprocess.Popen(
                     [instance_path, "/portable"],
                     cwd=os.path.dirname(instance_path)
                 )
             self.mt5_processes[key] = process
             self.connected_brokers[key] = True
-            logger.info(f"MT5 iniciado com sucesso para a corretora {key}.")
+            logger.info(f"Bloco 5 - MT5 iniciado com sucesso para a corretora {key}.")
+            if self.zmq_router:
+                broker_config = self.brokers[key]
+                asyncio.create_task(self.zmq_router.connect_broker_sockets(key, broker_config))
+                logger.info(f"Bloco 5 - Solicitado ao ZmqRouter para conectar sockets para {key}.")
+            else:
+                logger.warning(f"Bloco 5 - ZmqRouter não disponível para conectar sockets para {key}.")
+            self.brokers_updated.emit()  # Emitir sinal
             return True
         except Exception as e:
-            logger.error(f"Erro ao iniciar MT5 para a corretora {key}: {e}")
+            logger.error(f"Bloco 5 - Erro ao iniciar MT5 para a corretora {key}: {e}")
             return False
 
     def disconnect_broker(self, key):
@@ -353,25 +401,49 @@ class BrokerManager:
             bool: True se a desconexão foi bem-sucedida, False caso contrário.
         """
         if key not in self.brokers:
-            logger.error(f"Corretora {key} não encontrada.")
+            logger.error(f"Bloco 5 - Corretora {key} não encontrada.")
             return False
 
-        if key not in self.mt5_processes:
-            logger.warning(f"MT5 não está em execução para a corretora {key}.")
-            return True
+        if self.zmq_router:
+            asyncio.create_task(self.zmq_router.disconnect_broker_sockets(key))
+            logger.info(f"Bloco 5 - Solicitado ao ZmqRouter para desconectar sockets para {key}.")
+        else:
+            logger.warning(f"Bloco 5 - ZmqRouter não disponível para desconectar sockets para {key}.")
 
-        try:
-            logger.info(f"Parando MT5 para a corretora {key}...")
-            process = self.mt5_processes[key]
-            process.terminate()
-            process.wait()
-            del self.mt5_processes[key]
-            self.connected_brokers[key] = False
-            logger.info(f"MT5 parado com sucesso para a corretora {key}.")
-            return True
-        except Exception as e:
-            logger.error(f"Erro ao parar MT5 para a corretora {key}: {e}")
-            return False
+        process_to_terminate = None
+        if key in self.mt5_processes:
+            process_obj = self.mt5_processes[key]
+            poll_result = process_obj.poll()
+            logger.debug(f"Bloco 5 - Verificando processo MT5 para {key}. Resultado de poll(): {poll_result}")
+            if poll_result is None:
+                process_to_terminate = process_obj
+                logger.info(f"Bloco 5 - Processo MT5 para {key} está ativo (poll() retornou None). Tentando terminá-lo.")
+            else:
+                logger.warning(f"Bloco 5 - Processo MT5 para {key} já terminou (exit code: {poll_result}) ou não estava em execução ativa. Limpando registro interno.")
+                del self.mt5_processes[key]
+        else:
+            logger.warning(f"Bloco 5 - Processo MT5 para {key} não encontrado no rastreamento (já limpo ou nunca iniciado?).")
+
+        if process_to_terminate:
+            try:
+                logger.info(f"Bloco 5 - Parando MT5 para a corretora {key} (via terminate())...")
+                process_to_terminate.terminate()
+                process_to_terminate.wait(timeout=5)
+                del self.mt5_processes[key]
+                logger.info(f"Bloco 5 - MT5 parado com sucesso para a corretora {key}.")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Bloco 5 - Timeout ao esperar MT5 para {key} terminar. Matando o processo (via kill())...")
+                process_to_terminate.kill()
+                del self.mt5_processes[key]
+            except Exception as e:
+                logger.error(f"Bloco 5 - Erro ao parar MT5 para a corretora {key}: {e}")
+                self.connected_brokers[key] = False
+                self.brokers_updated.emit()  # Emitir sinal mesmo em caso de erro
+                return False
+
+        self.connected_brokers[key] = False
+        self.brokers_updated.emit()  # Emitir sinal
+        return True
 
     def is_connected(self, key):
         """Verifica se uma corretora está conectada.
@@ -392,4 +464,5 @@ class BrokerManager:
         """
         return [key for key, connected in self.connected_brokers.items() if connected]
 
-#versão 1.0.9.g - envio 1
+# core/broker_manager.py
+# Versão 1.0.9.j - envio 4
