@@ -348,6 +348,9 @@ class MT5TraderGui(QDialog):
     # dados recebidos do EA (posições, ordens, indicadores, etc.) na área de log.
     # Ajuste (versão 1.0.9.g - Correção AttributeError):
     # - Alterado para usar self.streaming_active_by_broker em vez de self.streaming_active no método _update_buttons.
+    # Ajuste (versão 1.0.9.k - Correção Streaming Multi-Corretoras):
+    # - Adicionado _handle_broker_status_updated para gerenciar estado de streaming de todas as corretoras.
+    # - Revisada lógica de _update_buttons para consistência em cenários de corretoras não selecionadas.
 
     def _connect_signals(self):
         """
@@ -356,7 +359,8 @@ class MT5TraderGui(QDialog):
         """
         self.broker_combo.currentIndexChanged.connect(self._update_buttons)
         self.zmq_message_handler.log_message_received.connect(self.update_log)
-        self.main_window.broker_status_updated.connect(self._update_buttons)
+        self.main_window.broker_status_updated.connect(self._handle_broker_status_updated)  # Novo slot
+        self.main_window.broker_status_updated.connect(self._update_buttons)  # Mantido para compatibilidade
         self.main_window.broker_connected.connect(self._select_broker)
         self.zmq_message_handler.positions_received.connect(self._update_positions)
         self.zmq_message_handler.orders_received.connect(self._update_orders)
@@ -368,7 +372,7 @@ class MT5TraderGui(QDialog):
         self.zmq_message_handler.tick_received.connect(self._update_tick)
         self.zmq_message_handler.stream_ohlc_received.connect(self._update_stream_ohlc)
         self.zmq_message_handler.stream_ohlc_indicators_received.connect(
-            self._update_stream_ohlc_indicators)  # Conexão para o novo sinal de streaming encapsulado
+            self._update_stream_ohlc_indicators)
         logger.debug("Sinais conectados no MT5TraderGui.")
 
     def _populate_brokers(self):
@@ -396,6 +400,28 @@ class MT5TraderGui(QDialog):
         else:
             logger.debug(f"Corretora {broker_key} não encontrada na QComboBox.")
 
+    @Slot(str)
+    def _handle_broker_status_updated(self, broker_key: str):
+        """
+        Gerencia o estado de streaming de todas as corretoras quando o status de uma muda.
+        Desativa o streaming de corretoras não registradas.
+
+        Args:
+            broker_key: Chave da corretora cujo status foi atualizado.
+        """
+        # Verifica todas as corretoras, não apenas a selecionada
+        for key in self.streaming_active_by_broker.keys():
+            is_registered = bool(
+                key in self.main_window.broker_status and self.main_window.broker_status[key])
+            if not is_registered and self.streaming_active_by_broker.get(key, False):
+                self.streaming_active_by_broker[key] = False
+                self.stream_ohlc_indicators_request_ids[key] = None
+                logger.info(f"Streaming desativado para {key} devido a corretora não registrada.")
+                self.update_log(f"Streaming desativado para {key} (corretora não registrada).")
+        # Atualiza a interface apenas para a corretora selecionada
+        if self.broker_combo.currentText() == broker_key:
+            self._update_buttons()
+
     def _update_buttons(self):
         """Atualiza o estado (habilitado/desabilitado) dos botões com base na corretora selecionada e seu status."""
         selected_key = self.broker_combo.currentText()
@@ -403,6 +429,11 @@ class MT5TraderGui(QDialog):
             selected_key and selected_key in self.main_window.broker_status and self.main_window.broker_status[
                 selected_key])
 
+        # Verifica se o streaming está ativo para a corretora selecionada
+        streaming_active = selected_key in self.streaming_active_by_broker and self.streaming_active_by_broker[
+            selected_key]
+
+        # Atualiza botões administrativos e de trading
         for btn in self.admin_buttons.values():
             btn.setEnabled(is_registered)
         self.history_data_btn.setEnabled(is_registered)
@@ -413,21 +444,19 @@ class MT5TraderGui(QDialog):
         for btn in self.modify_buttons.values():
             btn.setEnabled(is_registered)
 
-        # Habilita/desabilita botões de indicadores single-shot.
         for btn in self.indicator_buttons.values():
             btn.setEnabled(is_registered)
 
-        # Habilita/desabilita botões de streaming encapsulado com base no status da corretora.
-        # Verifica se o streaming está ativo para a corretora selecionada.
-        streaming_active = selected_key in self.streaming_active_by_broker and self.streaming_active_by_broker[
-            selected_key]
-        if is_registered and not streaming_active:
-            self.start_stream_indicators_btn.setEnabled(True)
-        elif not is_registered or streaming_active:
-            self.start_stream_indicators_btn.setEnabled(False)
-        self.stop_stream_indicators_btn.setEnabled(is_registered)
+        # Atualiza botões de streaming
+        self.start_stream_indicators_btn.setEnabled(is_registered and not streaming_active)
+        self.stop_stream_indicators_btn.setEnabled(is_registered and streaming_active)
 
-        logger.debug(f"Botões atualizados para corretora {selected_key}. Registrada: {is_registered}.")
+        logger.debug(
+            f"Botões atualizados para corretora {selected_key}. "
+            f"Registrada: {is_registered}, Streaming ativo: {streaming_active}, "
+            f"START habilitado: {self.start_stream_indicators_btn.isEnabled()}, "
+            f"STOP habilitado: {self.stop_stream_indicators_btn.isEnabled()}"
+        )
 
     def toggle_copy_trade(self, state):
         """
@@ -917,6 +946,9 @@ class MT5TraderGui(QDialog):
     # armazenando e reutilizando o request_id do START, e adiciona controle de botões.
     # Ajuste (versão 1.0.9.g - Suporte a múltiplas corretoras):
     # - Alterado para usar dicionário de request_id e estado de streaming por corretora.
+    # Ajuste (versão 1.0.9.k - Correção Streaming Multi-Corretoras):
+    # - Adicionado tratamento de erro robusto para comandos de streaming.
+    # - Garantida atualização de botões em todos os cenários, incluindo falhas.
 
     def _send_indicators_command(self, command):
         """
@@ -930,7 +962,20 @@ class MT5TraderGui(QDialog):
         if not broker_key:
             self.update_log("Erro: Nenhuma corretora selecionada.")
             logger.warning("Nenhuma corretora selecionada ao tentar enviar comando.")
+            self._update_buttons()
             return
+
+        # Verifica se a corretora está registrada antes de enviar o comando
+        is_registered = bool(
+            broker_key in self.main_window.broker_status and self.main_window.broker_status[broker_key])
+        if not is_registered and command in ["START_STREAM_OHLC_INDICATORS", "STOP_STREAM_OHLC_INDICATORS"]:
+            self.update_log(f"Erro: Corretora {broker_key} não está registrada.")
+            logger.warning(f"Comando {command} bloqueado: corretora {broker_key} não registrada.")
+            self.streaming_active_by_broker[broker_key] = False
+            self.stream_ohlc_indicators_request_ids[broker_key] = None
+            self._update_buttons()
+            return
+
         payload = {}
         try:
             if command == "START_STREAM_OHLC_INDICATORS":
@@ -977,41 +1022,41 @@ class MT5TraderGui(QDialog):
                     self.update_log("Erro: Nenhuma configuração de streaming válida adicionada na tabela.")
                     return
                 payload = {"configs": configs}
-                # Gera o request_id para START_STREAM_OHLC_INDICATORS e o armazena para uso no STOP, específico para esta corretora.
+                # Gera o request_id para START_STREAM_OHLC_INDICATORS e o armazena para uso no STOP
                 request_id = f"start_stream_ohlc_indicators_{broker_key}_{int(time.time())}"
                 self.stream_ohlc_indicators_request_ids[broker_key] = request_id
+                self.streaming_active_by_broker[broker_key] = True
                 self.update_log(f"Iniciando streaming com request_id: {request_id} para {broker_key}")
                 logger.info(f"Armazenado request_id para START_STREAM_OHLC_INDICATORS de {broker_key}: {request_id}")
-                # Desativa o botão START_STREAM_OHLC_INDICATORS e marca streaming como ativo para esta corretora.
-                self.start_stream_indicators_btn.setEnabled(False)
-                self.streaming_active_by_broker[broker_key] = True
+                # Envia o comando e atualiza os botões
                 asyncio.create_task(self.send_command(broker_key, command, payload, 'data', use_data_port=True))
+                self._update_buttons()
             elif command == "STOP_STREAM_OHLC_INDICATORS":
-                # Reutiliza o request_id armazenado do START_STREAM_OHLC_INDICATORS para a corretora atual, se disponível.
+                # Reutiliza o request_id armazenado do START_STREAM_OHLC_INDICATORS
                 if broker_key in self.stream_ohlc_indicators_request_ids and self.stream_ohlc_indicators_request_ids[
                     broker_key]:
                     request_id = self.stream_ohlc_indicators_request_ids[broker_key]
                     self.update_log(f"Parando streaming com request_id: {request_id} para {broker_key}")
                     logger.info(
                         f"Reutilizando request_id para STOP_STREAM_OHLC_INDICATORS de {broker_key}: {request_id}")
-                    # Passa o request_id armazenado explicitamente para o método send_command.
+                    # Passa o request_id armazenado explicitamente
                     asyncio.create_task(self.zmq_router.send_command_to_broker(
                         broker_key, command, payload, request_id, use_data_port=True))
-                    # Limpa o request_id armazenado após o STOP para esta corretora.
+                    # Limpa o estado do streaming
                     self.stream_ohlc_indicators_request_ids[broker_key] = None
-                    # Reativa o botão START_STREAM_OHLC_INDICATORS e marca streaming como inativo para esta corretora.
-                    self.start_stream_indicators_btn.setEnabled(True)
                     self.streaming_active_by_broker[broker_key] = False
-                    self.update_log(f"Botão START_STREAM_OHLC_INDICATORS reativado para {broker_key}.")
-                    logger.info(f"Botão START_STREAM_OHLC_INDICATORS reativado após STOP para {broker_key}.")
+                    self._update_buttons()
+                    self.update_log(f"Streaming parado para {broker_key}.")
+                    logger.info(f"Streaming parado para {broker_key}.")
                 else:
                     self.update_log(
-                        f"Erro: Nenhum streaming ativo encontrado para parar na corretora {broker_key}. Inicie um streaming primeiro.")
-                    logger.warning(f"Nenhum request_id armazenado para STOP_STREAM_OHLC_INDICATORS de {broker_key}.")
-                    # Reativa o botão START_STREAM_OHLC_INDICATORS mesmo se não houver streaming ativo para esta corretora.
-                    self.start_stream_indicators_btn.setEnabled(True)
-                    if broker_key in self.streaming_active_by_broker:
-                        self.streaming_active_by_broker[broker_key] = False
+                        f"Aviso: Nenhum streaming ativo encontrado para parar na corretora {broker_key}. Estado ajustado.")
+                    logger.info(
+                        f"Nenhum request_id armazenado para STOP_STREAM_OHLC_INDICATORS de {broker_key}. Ajustando estado.")
+                    # Garante que o estado esteja consistente
+                    self.streaming_active_by_broker[broker_key] = False
+                    self.stream_ohlc_indicators_request_ids[broker_key] = None
+                    self._update_buttons()
             elif command in ["GET_INDICATOR_MA", "GET_OHLC", "GET_TICK"]:
                 symbol = self.indicator_symbol.text()
                 if not symbol:
@@ -1031,14 +1076,14 @@ class MT5TraderGui(QDialog):
                         return
                     payload["period"] = period
                 asyncio.create_task(self.send_data_command(broker_key, command, payload))
-        except ValueError as e:
-            self.update_log(f"❌ Erro nos parâmetros: {str(e)}")
-            logger.error(f"Erro nos parâmetros para comando {command}: {str(e)}")
-            # Caso haja erro nos parâmetros do START, reativa o botão START_STREAM_OHLC_INDICATORS.
+        except Exception as e:
+            self.update_log(f"❌ Erro ao processar comando {command}: {str(e)}")
+            logger.error(f"Erro ao processar comando {command} para {broker_key}: {str(e)}")
+            # Em caso de erro no START, reverte o estado do streaming
             if command == "START_STREAM_OHLC_INDICATORS":
-                self.start_stream_indicators_btn.setEnabled(True)
-                if broker_key in self.streaming_active_by_broker:
-                    self.streaming_active_by_broker[broker_key] = False
+                self.streaming_active_by_broker[broker_key] = False
+                self.stream_ohlc_indicators_request_ids[broker_key] = None
+                self._update_buttons()
 
 # gui/mt5_trader_gui.py
-# Versão 1.0.9.g - Envio 7  -->
+# Versão 1.0.9.g - Correção Final
