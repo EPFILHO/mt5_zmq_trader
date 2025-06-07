@@ -1,5 +1,5 @@
 # Arquivo: gui/boleta_trader_gui.py
-# Versão: 1.0.9.k - Envio 7
+# Versão: 1.0.9.k - Envio 5
 # Objetivo: Implementa a interface de boleta de trading com abas ordenadas alfabeticamente
 # e sub-abas para ordens abertas, posições pendentes e histórico de trades.
 # Ajustes:
@@ -10,8 +10,6 @@
 # - [FIX 1, 2] Lógica de seleção de abas aprimorada: mantém a aba atual OU foca na aba da corretora recém-registrada.
 # - [FIX 3] Corrigido problema de posições não aparecerem após reinício do MT5 (reset da flag positions_requested).
 # - [FIX 4] Atualização automática da tabela de posições/histórico ao receber eventos de trade via stream.
-# - [FIX 5] Corrigida a mensagem de log "Modificada ordem #desconhecido" para exibir o ticket correto (unicidade do request_id).
-# - [FIX 6] Corrigida a atualização duplicada de posições (centralizando em _on_trade_event_received).
 
 # Bloco 1 - Importações e Configuração Inicial
 # Objetivo: Importar bibliotecas necessárias e configurar o logging para depuração e monitoramento.
@@ -910,15 +908,14 @@ class BoletaTraderGui(QDialog):
             command = "TRADE_POSITION_CLOSE_ID" if table.objectName().startswith(
                 "open_orders") else "TRADE_ORDER_CLOSE_ID"
             payload = {"ticket": int(ticket)}
-            # [FIX 5] Gerar request_id usando command.lower() e time.time() (float) para consistência e unicidade.
-            generated_request_id = f"{command.lower()}_{broker_key}_{time.time()}"
-            self.pending_tickets[generated_request_id] = ticket  # Armazena o ticket para rastrear a resposta.
+            request_id = f"close_{broker_key}_{int(time.time())}"
+            self.pending_tickets[request_id] = ticket  # Armazena o ticket para rastrear a resposta.
 
-            self._send_async_command(broker_key, command, payload, generated_request_id)
+            self._send_async_command(broker_key, command, payload, request_id)
             self.update_log(
                 f"Comando enviado: Fechar ordem #{ticket} para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
             logger.info(
-                f"Bloco 8 - Comando agendado: Fechar ordem #{ticket} para {broker_key} com request_id {generated_request_id}")
+                f"Bloco 8 - Comando agendado: Fechar ordem #{ticket} para {broker_key} com request_id {request_id}")
         else:
             self.update_log("Erro: Ticket da ordem não encontrado.")
 
@@ -1011,15 +1008,14 @@ class BoletaTraderGui(QDialog):
             command = "TRADE_POSITION_MODIFY"
             payload = {"ticket": int(ticket), "symbol": symbol, "sl": sl, "tp": tp}
 
-        # [FIX 5] Gerar request_id usando command.lower() e time.time() (float) para consistência e unicidade.
-        generated_request_id = f"{command.lower()}_{broker_key}_{time.time()}"
-        self.pending_tickets[generated_request_id] = ticket  # Armazena o ticket para rastrear a resposta.
+        request_id = f"modify_{broker_key}_{int(time.time())}"
+        self.pending_tickets[request_id] = ticket  # Armazena o ticket para rastrear a resposta.
 
-        self._send_async_command(broker_key, command, payload, generated_request_id)
+        self._send_async_command(broker_key, command, payload, request_id)
         self.update_log(
             f"Comando enviado: Modificar ordem #{ticket} para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
         logger.info(
-            f"Bloco 8 - Comando agendado: Modificar ordem #{ticket} para {broker_key} com request_id {generated_request_id}")
+            f"Bloco 8 - Comando agendado: Modificar ordem #{ticket} para {broker_key} com request_id {request_id}")
 
         if dialog:
             dialog.close()
@@ -1075,20 +1071,26 @@ class BoletaTraderGui(QDialog):
         if mode == "Hedge":
             command = "TRADE_POSITION_PARTIAL"
             payload = {"ticket": int(ticket), "volume": volume}
+            request_id = f"partial_{broker_key}_{int(time.time())}"
+            self.pending_tickets[request_id] = ticket  # Armazena o ticket para rastrear a resposta.
+
+            self._send_async_command(broker_key, command, payload, request_id)
+            self.update_log(
+                f"Comando enviado: Fechamento parcial da ordem #{ticket} ({volume}) para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
+            logger.info(
+                f"Bloco 8 - Comando agendado: Fechamento parcial da ordem #{ticket} para {broker_key} com request_id {request_id}")
         else:  # Lógica para modo Netting (redução de posição via ordem oposta).
             opposite_type = "SELL" if position_type == "BUY" else "BUY"
             command = f"TRADE_ORDER_TYPE_{opposite_type}"
             payload = {"symbol": symbol, "type": opposite_type, "volume": volume}
+            request_id = f"partial_netting_{broker_key}_{int(time.time())}"
+            self.pending_tickets[request_id] = ticket  # Armazena o ticket para rastrear a resposta.
 
-        # [FIX 5] Gerar request_id usando command.lower() e time.time() (float) para consistência e unicidade.
-        generated_request_id = f"{command.lower()}_{broker_key}_{time.time()}"
-        self.pending_tickets[generated_request_id] = ticket  # Armazena o ticket para rastrear a resposta.
-
-        self._send_async_command(broker_key, command, payload, generated_request_id)
-        self.update_log(
-            f"Comando enviado: Redução de posição #{ticket} via ordem oposta ({opposite_type} {volume}) para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
-        logger.info(
-            f"Bloco 8 - Comando agendado: Redução de posição #{ticket} para {broker_key} com request_id {generated_request_id}")
+            self._send_async_command(broker_key, command, payload, request_id)
+            self.update_log(
+                f"Comando enviado: Redução de posição #{ticket} via ordem oposta ({opposite_type} {volume}) para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
+            logger.info(
+                f"Bloco 8 - Comando agendado: Redução de posição #{ticket} para {broker_key} com request_id {request_id}")
 
         if dialog:
             dialog.close()
@@ -1128,13 +1130,12 @@ class BoletaTraderGui(QDialog):
                     "Fechamento Parcial" if "partial" in request_id.lower() else \
                         "Modificada" if "modify" in request_id.lower() else "Reduzida"
 
-                ticket = self.pending_tickets.get(request_id, "desconhecido")  # Agora deve encontrar o ticket correto.
+                ticket = self.pending_tickets.get(request_id, "desconhecido")
                 self.update_log(
                     f"{operation} ordem #{ticket} para {broker_key} às {time.strftime('%H:%M:%S', time.localtime())}.")
                 logger.info(
-                    f"Bloco 9 - Resposta de operação bem-sucedida para {broker_key} com request_id {request_id}. (Atualização de posições via TRADE_EVENT).")
-                # [FIX 6] Removida a chamada para _request_positions_for_broker aqui.
-                # A atualização de posições será feita exclusivamente via TRADE_EVENT.
+                    f"Bloco 9 - Solicitando atualização de posições para {broker_key} após operação bem-sucedida com request_id {request_id}.")
+                self._request_positions_for_broker(broker_key)  # Solicita atualização das posições.
             else:
                 self.update_log(f"Sucesso ({broker_key}): {message}")
                 logger.debug(
@@ -1188,7 +1189,7 @@ if __name__ == "__main__":
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    # Instâncias mock para permitir a execução isolad.
+    # Instâncias mock para permitir a execução isolada.
     # Em um ambiente real, estas seriam instâncias válidas dos seus objetos.
     mock_config = None
     mock_broker_manager = None
@@ -1202,4 +1203,4 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 
 # Arquivo: gui/boleta_trader_gui.py
-# Versão: 1.0.9.k - Envio 7
+# Versão: 1.0.9.k - Envio 5
