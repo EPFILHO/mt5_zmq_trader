@@ -1,5 +1,5 @@
 # main.py
-# Versão 1.0.9.i - envio 8 - CORES
+# Versão 1.0.9.i - envio 9
 # Ajustes:
 # - CORREÇÃO CRÍTICA: Ajustada a ordem de inicialização e passagem de dependências
 #   entre ZmqRouter e BrokerManager para resolver a dependência circular.
@@ -280,6 +280,9 @@ def sigint_handler(*args):
 
 # Bloco 7 - Função Principal (main_application_flow)
 # Objetivo: Orquestrar a inicialização dos componentes principais da aplicação.
+# Ajuste (versão 1.0.9.j - Passagem de MT5ProcessMonitor):
+# - Adicionado mt5_monitor como parâmetro para MainWindow para uso no StatusGui.
+
 async def main_application_flow():
     """Fluxo principal da aplicação, inicializando GUI, ZMQ e gerenciadores."""
     global zmq_task, zmq_router_instance, shutdown_event, mt5_processes, broker_manager, mt5_monitor
@@ -321,8 +324,8 @@ async def main_application_flow():
     logger.debug("Handler de SIGINT configurado.")
 
     # --- Criação da GUI ---
-    # Passa a referência do evento global para a MainWindow
-    main_window = MainWindow(config, broker_manager, zmq_router_instance, shutdown_event, root_path)
+    # Passa a referência do evento global e mt5_monitor para a MainWindow
+    main_window = MainWindow(config, broker_manager, zmq_router_instance, shutdown_event, root_path, mt5_monitor)
     main_window.show()
     logger.info("Janela principal exibida.")
 
@@ -424,4 +427,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
 # main.py
-# Versão 1.0.9.i - envio 8 - CORES
+# Versão 1.0.9.i - envio 9 - Mudança status gui (bloco 7)
