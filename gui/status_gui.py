@@ -1,8 +1,11 @@
 # status_gui.py
-# Versão 1.0.9.a - envio 5
-# Ajuste: janela separada (QDialog), atualização automática sempre que aberta, "X" vermelho para MT5, só altera o estritamente necessário
-# Novo: intervalo de atualização configurável via config.ini
+# Versão 1.0.9.j - Envio 1
+# Ajustes:
+# - (1.0.9.j, envio 4): Adicionado uso do buffer trade_allowed_states do zmq_message_handler para inicializar e atualizar a coluna "Algotrading".
+# - Simplificado _update_status_info e _update_trade_allowed para apenas chamar update_status, pois o buffer é atualizado pelo zmq_message_handler.
+# - Mantidas todas as funcionalidades anteriores de 1.0.9.i, envio 3.
 
+# Bloco 1 - Importações e Configuração Inicial
 import time
 import logging
 import asyncio
@@ -14,33 +17,50 @@ from PySide6.QtGui import QFont, QBrush, QColor, QFontMetrics
 
 logger = logging.getLogger(__name__)
 
+# Bloco 2 - Definição da Classe StatusGui
 class StatusGui(QDialog):
-    def __init__(self, config, broker_manager, zmq_router, zmq_message_handler, main_window, parent=None):
+    def __init__(self, config, broker_manager, zmq_router, zmq_message_handler, main_window, mt5_monitor, parent=None):
+        """
+        Inicializa a janela de status das corretoras.
+
+        Args:
+            config: Gerenciador de configurações.
+            broker_manager: Gerenciador de corretoras.
+            zmq_router: Roteador ZMQ para comunicação.
+            zmq_message_handler: Manipulador de mensagens ZMQ.
+            main_window: Referência à janela principal.
+            mt5_monitor: Monitor de processos MT5.
+            parent: Widget pai (opcional).
+        """
         super().__init__(parent)
+        logger.info("Bloco 2 - Inicializando StatusGui...")
         self.config = config
         self.broker_manager = broker_manager
         self.zmq_router = zmq_router
         self.zmq_message_handler = zmq_message_handler
         self.main_window = main_window
-        self.broker_data = {}
+        self.mt5_monitor = mt5_monitor
+        self.broker_data = {}  # Mantido por compatibilidade, mas menos usado agora
         self.setWindowTitle("Status das Corretoras")
         self.setModal(False)
         self._init_ui()
         self._connect_signals()
         self._adjust_table_size()
-        self._setup_timer()
-        self._timer_active = False
+        logger.info("Bloco 2 - StatusGui inicializado.")
 
+    # Bloco 3 - Configuração da Interface do Usuário
     def _init_ui(self):
+        """Configura os elementos da interface gráfica."""
+        logger.debug("Bloco 3 - Configurando interface do usuário...")
         layout = QVBoxLayout(self)
         self.setLayout(layout)
 
-        # Tabela: agora com 10 colunas (Balance de volta)
+        # Tabela com 8 colunas
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
-            "MT5 Aberto", "MT5 Logado", "Algotrading", "EA Registrada",
-            "Corretora - Conta", "Nome", "Tipo", "Modo", "Balance", "Latência"
+            "MT5 Aberto", "MT5 Conectado", "EA Registrada", "Algotrading",
+            "Corretora - Conta", "Nome", "Tipo", "Modo"
         ])
         self.table.setRowCount(0)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -66,9 +86,9 @@ class StatusGui(QDialog):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
-        # Botão Atualizar (opcional, pode ser removido se quiser)
+        # Botão Atualizar
         update_button = QPushButton("Atualizar Agora")
-        update_button.clicked.connect(self._update_periodically)
+        update_button.clicked.connect(self.update_status)
         update_button.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -81,22 +101,25 @@ class StatusGui(QDialog):
             }
         """)
         layout.addWidget(update_button)
+        logger.debug("Bloco 3 - Interface configurada.")
 
+    # Bloco 4 - Conexão de Sinais
     def _connect_signals(self):
+        """Conecta sinais para atualizar a tabela quando necessário."""
+        logger.debug("Bloco 4 - Conectando sinais...")
         if hasattr(self.main_window, "broker_connected"):
             self.main_window.broker_connected.connect(self.update_status)
         if hasattr(self.main_window, "broker_status_updated"):
             self.main_window.broker_status_updated.connect(self.update_status)
         self.zmq_message_handler.status_info_received.connect(self._update_status_info)
-        logger.debug("Sinais conectados no StatusGui.")
+        self.zmq_message_handler.trade_allowed_update_received.connect(self._update_trade_allowed)
+        logger.debug("Bloco 4 - Sinais conectados.")
 
-    def _get_broker_info(self, key):
-        brokers = self.broker_manager.get_brokers()
-        return brokers.get(key, {})
-
+    # Bloco 5 - Ajuste de Tamanho da Tabela
     def _adjust_table_size(self):
         """Ajusta o tamanho da janela e da coluna 'Corretora - Conta'."""
-        largura_fixa = 1200
+        logger.debug("Bloco 5 - Ajustando tamanho da tabela...")
+        largura_fixa = 1000
         self.setMinimumWidth(largura_fixa)
         self.resize(largura_fixa, self.height())
 
@@ -119,74 +142,67 @@ class StatusGui(QDialog):
             self.table.setColumnWidth(col_idx, width)
         else:
             self.table.setColumnWidth(4, 180)
+        logger.debug("Bloco 5 - Tamanho da tabela ajustado.")
 
-    def _setup_timer(self):
-        self.timer = QTimer(self)
-        # Lê o intervalo de atualização do config.ini, com padrão de 5000 ms
-        update_interval = self.config.getint('General', 'status_update_interval', fallback=5000)
-        self.timer.setInterval(update_interval)
-        self.timer.timeout.connect(self._update_periodically)
-        logger.debug(f"Timer configurado com intervalo de {update_interval} ms")
-
+    # Bloco 7 - Gerenciamento de Eventos da Janela
     def showEvent(self, event):
-        """Inicia o timer sempre que a janela for aberta/mostrada."""
+        """Atualiza a tabela ao mostrar a janela."""
+        logger.debug("Bloco 7 - Janela StatusGui exibida.")
         super().showEvent(event)
-        if not self._timer_active:
-            self.timer.start()
-            self._timer_active = True
-            self._update_periodically()  # Atualiza imediatamente ao abrir
+        self.update_status()
 
     def hideEvent(self, event):
-        """Para o timer ao esconder a janela (opcional, redundante com closeEvent)."""
+        """Evento ao esconder a janela."""
+        logger.debug("Bloco 7 - Janela StatusGui oculta.")
         super().hideEvent(event)
-        if self._timer_active:
-            self.timer.stop()
-            self._timer_active = False
 
     def closeEvent(self, event):
-        if hasattr(self, "timer") and self._timer_active:
-            self.timer.stop()
-            self._timer_active = False
-            logger.info("Timer parado ao fechar a janela StatusGui.")
+        """Evento ao fechar a janela."""
+        logger.info("Bloco 7 - Fechando janela StatusGui.")
         event.accept()
 
-    def _send_periodic_commands(self):
-        for key in self.broker_manager.get_connected_brokers():
-            timestamp = int(time.time())
-            payload = {"timestamp": time.time()}
-            asyncio.create_task(self.zmq_router.send_command_to_broker(
-                key, "GET_STATUS_INFO", payload, f"get_status_info_{key}_{timestamp}"
-            ))
-            logger.debug(f"Enviando GET_STATUS_INFO para {key}")
-
-    @Slot()
-    def _update_periodically(self):
-        self._send_periodic_commands()
+    # Bloco 11 - Atualização de Informações de Status
+    @Slot(dict)
+    def _update_status_info(self, response):
+        """Atualiza informações de status recebidas do GET_STATUS_INFO."""
+        logger.debug("Bloco 11 - Processando resposta de status...")
         self.update_status()
-        logger.debug("Atualização periódica executada.")
+        logger.debug("Bloco 11 - Status atualizado.")
 
+    @Slot(dict)
+    def _update_trade_allowed(self, response):
+        """Atualiza o status de trade_allowed recebido do evento TRADE_ALLOWED_UPDATE."""
+        logger.debug("Bloco 11 - Processando evento TRADE_ALLOWED_UPDATE...")
+        self.update_status()
+        logger.debug("Bloco 11 - Trade_allowed atualizado.")
+
+    # Bloco 10 - Atualização da Tabela de Status
     @Slot()
     def update_status(self):
+        """Atualiza a tabela com o status das corretoras."""
+        logger.debug("Bloco 10 - Atualizando tabela de status...")
         brokers = self.broker_manager.get_brokers()
+        trade_allowed_states = self.zmq_message_handler.get_trade_allowed_states()  # Consultar o buffer
         self._adjust_table_size()
         self.table.setRowCount(len(brokers))
         row = 0
         status_font = QFont()
         status_font.setPointSize(16)
         for key in sorted(brokers.keys()):
-            is_connected = self.broker_manager.is_connected(key)
-            # MT5 Aberto
-            item = QTableWidgetItem("✔" if is_connected else "✘")
-            item.setForeground(QBrush(QColor("green" if is_connected else "red")))
+            # MT5 Aberto: Verifica se o processo MT5 está em execução
+            process = self.broker_manager.mt5_processes.get(key, None)
+            is_process_running = process is not None and process.poll() is None
+            item = QTableWidgetItem("✔" if is_process_running else "✘")
+            item.setForeground(QBrush(QColor("green" if is_process_running else "red")))
             item.setTextAlignment(Qt.AlignCenter)
             item.setFont(status_font)
             self.table.setItem(row, 0, item)
 
-            # MT5 Logado
-            is_registered = getattr(self.main_window, "broker_status", {}).get(key, False)
-            if is_connected:
-                symbol = "✔" if is_registered else "✘"
-                color = "green" if is_registered else "red"
+            # MT5 Conectado: Usa is_connected do BrokerManager
+            is_connected = self.broker_manager.is_connected(key)
+            if is_process_running:
+                symbol = "✔" if is_connected else "✘"
+                color = "green" if is_connected else "red"
             else:
                 symbol = "-"
                 color = "black"
@@ -196,10 +212,23 @@ class StatusGui(QDialog):
             item.setFont(status_font)
             self.table.setItem(row, 1, item)
 
-            # Algotrading
-            broker_data = self.broker_data.get(key, {})
-            trade_allowed = broker_data.get("trade_allowed", None)
-            if is_connected and is_registered:
+            # EA Registrada: Usa is_registered do main_window.broker_status
+            is_registered = getattr(self.main_window, "broker_status", {}).get(key, False)
+            if is_process_running:
+                symbol = "✔" if is_registered else "✘"
+                color = "green" if is_registered else "red"
+            else:
+                symbol = "-"
+                color = "black"
+            item = QTableWidgetItem(symbol)
+            item.setForeground(QBrush(QColor(color)))
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFont(status_font)
+            self.table.setItem(row, 2, item)
+
+            # Algotrading: Consultar o buffer do zmq_message_handler
+            if is_process_running and is_registered:
+                trade_allowed = trade_allowed_states.get(key, None)
                 if trade_allowed is True:
                     symbol = "✔"
                     color = "green"
@@ -212,22 +241,6 @@ class StatusGui(QDialog):
             else:
                 symbol = "-"
                 color = "black"
-            item = QTableWidgetItem(symbol)
-            item.setForeground(QBrush(QColor(color)))
-            item.setTextAlignment(Qt.AlignCenter)
-            item.setFont(status_font)
-            self.table.setItem(row, 2, item)
-
-            # EA Registrada
-            if is_connected and is_registered:
-                symbol = "✔"
-                color = "green"
-            elif not is_connected:
-                symbol = "-"
-                color = "black"
-            else:
-                symbol = "✘"
-                color = "red"
             item = QTableWidgetItem(symbol)
             item.setForeground(QBrush(QColor(color)))
             item.setTextAlignment(Qt.AlignCenter)
@@ -254,27 +267,13 @@ class StatusGui(QDialog):
             mode = broker_info.get("mode", "N/A")
             self.table.setItem(row, 7, QTableWidgetItem(mode))
 
-            # Balance
-            balance = broker_data.get("balance", "-") if is_connected and is_registered else "-"
-            self.table.setItem(row, 8, QTableWidgetItem(str(balance)))
-
-            # Latência
-            latency = broker_data.get("latency", "-") if is_connected and is_registered else "-"
-            self.table.setItem(row, 9, QTableWidgetItem(latency))
-
             row += 1
 
-        logger.debug(f"Tabela atualizada com {len(brokers)} corretoras.")
+        logger.debug(f"Bloco 10 - Tabela atualizada com {len(brokers)} corretoras.")
 
-    @Slot(dict)
-    def _update_status_info(self, response):
-        broker_key = response.get("broker_key")
-        if broker_key:
-            self.broker_data.setdefault(broker_key, {})
-            self.broker_data[broker_key]["trade_allowed"] = response.get("trade_allowed", None)
-            self.broker_data[broker_key]["balance"] = response.get("balance", "-")
-            self.broker_data[broker_key]["latency"] = response.get("latency", "-")
-            self.update_status()
+    def _get_broker_info(self, key):
+        brokers = self.broker_manager.get_brokers()
+        return brokers.get(key, {})
 
 # ------------ término do arquivo status_gui.py ------------
-# Versão 1.0.9.a - envio 5
+# Versão 1.0.9.j - Envio 1
