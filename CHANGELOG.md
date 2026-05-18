@@ -17,6 +17,8 @@ Tipos de mudança:
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-18
+
 ### Changed
 - **EA: cotação via `SymbolInfoTick`**: as ordens a mercado (BUY/SELL e fechamento por ticket) liam o preço com `SymbolInfoDouble(SYMBOL_ASK/BID)`, que pode retornar 0 num símbolo recém-adicionado ao Market Watch (ex.: virada de contrato no B3). Novo helper `GetMarketPrice()` usa `SymbolInfoTick` + `NormalizeDouble`. **Requer recompilar o EA.**
 - **EA: `HandleSetMagicNumberCommand` usa `JSONNode.ToInteger()`** em vez de `StringToInteger(ToString())`, consistente com o resto do parsing JSON. **Requer recompilar o EA.**
@@ -316,7 +318,8 @@ Tipos de mudança:
 - Monitor de processo MT5 (detecta crash e reinicia)
 - Monitor de internet (detecta queda de conexão)
 
-[Unreleased]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/EPFILHO/EPCopyFlow2.0/compare/v0.1.8...v0.1.9
