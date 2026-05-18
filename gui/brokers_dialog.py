@@ -68,6 +68,9 @@ class BrokersDialog(QDialog):
         self.name_edit = QLineEdit()
         self.client_edit = QLineEdit()
         self.broker_name_edit = QLineEdit()
+        # Nome da corretora limitado a 6 caracteres — mantém o card e a chave
+        # do broker (broker_name + login) compactos.
+        self.broker_name_edit.setMaxLength(6)
         self.login_edit = QLineEdit()
 
         # Senha com toggle

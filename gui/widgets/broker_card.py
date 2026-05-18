@@ -59,7 +59,20 @@ class BrokerCard(QFrame):
         if self._show_select_checkbox:
             self.select_checkbox = QCheckBox()
             self.select_checkbox.setChecked(self._selected)
-            self.select_checkbox.setStyleSheet("background-color: transparent;")
+            self.select_checkbox.setToolTip("Marcar para 'Conectar Selecionados'")
+            self.select_checkbox.setStyleSheet(
+                "QCheckBox { background-color: transparent; }"
+                "QCheckBox::indicator {"
+                "  width: 16px; height: 16px;"
+                "  border: 2px solid #8a8d98; border-radius: 3px;"
+                "  background-color: #ffffff;"
+                "}"
+                "QCheckBox::indicator:hover { border-color: #2ecc71; }"
+                "QCheckBox::indicator:checked {"
+                f"  background-color: {_COLOR_GREEN};"
+                f"  border-color: {_COLOR_GREEN};"
+                "}"
+            )
             self.select_checkbox.toggled.connect(self._handle_select_toggled)
             top_row.addWidget(self.select_checkbox)
         if self.session_label:
