@@ -229,6 +229,10 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
+        # Histórico (índice 2): carrega ao abrir a aba — evita ter que clicar
+        # "Atualizar" toda vez que o programa inicia.
+        if index == 2:
+            self.history_page.refresh()
 
     # ── Theme ──
     def apply_theme(self):

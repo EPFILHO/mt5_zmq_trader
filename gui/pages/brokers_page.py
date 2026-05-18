@@ -30,6 +30,9 @@ class BrokersPage(QWidget):
         self.tcp_message_handler = tcp_message_handler
         self._broker_status = {}
         self.broker_cards = {}
+        # Keys de slaves marcados via checkbox. Vive na página (não no card)
+        # porque os cards são destruídos/recriados a cada refresh_brokers().
+        self._selected_keys = set()
         # Debounce de refresh_brokers: cada REGISTER/UNREGISTER de EA dispara
         # refresh; com 9 brokers conectando, isso vira ~18 refreshes em 1-2s.
         # Coalesce em 50ms evita janelas Qt piscando durante destroy/recreate.
@@ -70,6 +73,11 @@ class BrokersPage(QWidget):
         self.connect_all_btn.setProperty("class", "connect-btn")
         self.connect_all_btn.clicked.connect(self._connect_all)
         header.addWidget(self.connect_all_btn)
+
+        self.connect_selected_btn = QPushButton("Conectar Selecionados")
+        self.connect_selected_btn.setProperty("class", "connect-btn")
+        self.connect_selected_btn.clicked.connect(self._connect_selected)
+        header.addWidget(self.connect_selected_btn)
 
         self.disconnect_all_btn = QPushButton("Desconectar Todas")
         self.disconnect_all_btn.setProperty("class", "disconnect-btn")
@@ -163,6 +171,9 @@ class BrokersPage(QWidget):
             self.master_placeholder.show()
             self.master_area.insertWidget(0, self.master_placeholder)
 
+        # Descarta da seleção keys que não existem mais (broker removido).
+        self._selected_keys &= set(slave_keys)
+
         # Slave cards in flow layout (colunas adaptam à largura disponível)
         for key in slave_keys:
             card = BrokerCard(
@@ -172,6 +183,9 @@ class BrokersPage(QWidget):
                 on_connect=lambda k=key: self._connect_broker(k),
                 on_disconnect=lambda k=key: self._disconnect_broker(k),
                 session_label=self.broker_manager.get_session_label(key),
+                show_select_checkbox=True,
+                selected=(key in self._selected_keys),
+                on_select_toggled=self._on_card_select_toggled,
                 parent=self,
             )
             self.broker_cards[key] = card
@@ -290,6 +304,32 @@ class BrokersPage(QWidget):
                     self.broker_manager.connect_broker(key)
                 except Exception as e:
                     logger.error(f"Erro ao conectar {key}: {e}")
+        self.refresh_brokers()
+        self.broker_status_changed.emit()
+
+    def _on_card_select_toggled(self, key, checked):
+        if checked:
+            self._selected_keys.add(key)
+        else:
+            self._selected_keys.discard(key)
+
+    def _connect_selected(self):
+        if not self._selected_keys:
+            QMessageBox.information(
+                self, "Conectar Selecionados",
+                "Nenhum slave selecionado.\n\n"
+                "Marque a caixa de seleção nos cards que deseja conectar."
+            )
+            return
+        connected = self.broker_manager.get_connected_brokers()
+        brokers = self.broker_manager.get_brokers()
+        for key in list(self._selected_keys):
+            if key in brokers and key not in connected:
+                try:
+                    self.broker_manager.connect_broker(key)
+                except Exception as e:
+                    logger.error(f"Erro ao conectar {key}: {e}")
+        self._selected_keys.clear()
         self.refresh_brokers()
         self.broker_status_changed.emit()
 

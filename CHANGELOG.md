@@ -17,6 +17,12 @@ Tipos de mudança:
 
 ## [Unreleased]
 
+### Added
+- **Botão "Conectar Selecionados"** na página Corretoras: cada card de slave ganhou uma caixa de seleção; o botão conecta apenas os slaves marcados. Útil para ligar só o grupo Forex ou só o grupo B3 sem subir todas as instâncias MT5. A seleção é limpa após conectar. O estado das caixas vive na página (`_selected_keys`), sobrevivendo ao destroy/recreate dos cards a cada `refresh_brokers()`.
+
+### Changed
+- **Aba Histórico carrega ao abrir**: ao navegar para a aba Histórico o conteúdo é buscado automaticamente — não é mais necessário clicar "Atualizar" após iniciar o programa.
+
 ## [0.3.1] — 2026-05-18
 
 ### Changed

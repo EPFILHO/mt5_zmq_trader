@@ -4,7 +4,7 @@
 
 import logging
 from PySide6.QtWidgets import (
-    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
 )
 from PySide6.QtCore import Qt
 from gui import themes
@@ -20,7 +20,8 @@ _COLOR_GRAY = "#585b70"
 class BrokerCard(QFrame):
     def __init__(self, broker_key, broker_data, is_connected=False,
                  show_connect_btn=False, on_connect=None, on_disconnect=None,
-                 session_label=None, parent=None):
+                 session_label=None, show_select_checkbox=False,
+                 selected=False, on_select_toggled=None, parent=None):
         super().__init__(parent)
         self.broker_key = broker_key
         self.broker_data = broker_data
@@ -28,6 +29,9 @@ class BrokerCard(QFrame):
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self.session_label = session_label
+        self._show_select_checkbox = show_select_checkbox
+        self._selected = selected
+        self._on_select_toggled = on_select_toggled
 
         role = broker_data.get("role", "slave")
         is_master = role == "master"
@@ -50,8 +54,14 @@ class BrokerCard(QFrame):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(6)
 
-        # Row 1: Session badge + Name + Role badge
+        # Row 1: Select checkbox + Session badge + Name + Role badge
         top_row = QHBoxLayout()
+        if self._show_select_checkbox:
+            self.select_checkbox = QCheckBox()
+            self.select_checkbox.setChecked(self._selected)
+            self.select_checkbox.setStyleSheet("background-color: transparent;")
+            self.select_checkbox.toggled.connect(self._handle_select_toggled)
+            top_row.addWidget(self.select_checkbox)
         if self.session_label:
             is_master = role == "master"
             badge_bg = "#ff8c00" if is_master else "#3478f6"
@@ -160,6 +170,10 @@ class BrokerCard(QFrame):
                     btn.clicked.connect(lambda _checked=False: self._on_connect())
             btn_row.addWidget(btn)
             layout.addLayout(btn_row)
+
+    def _handle_select_toggled(self, checked):
+        if self._on_select_toggled:
+            self._on_select_toggled(self.broker_key, checked)
 
     def update_status_indicators(self, mt5=None, ea=None, brk=None, alg=None):
         """Update the 4 status indicator dots.
