@@ -155,11 +155,8 @@ class BrokerCard(QFrame):
             # Toggle "Selecionar" — só faz sentido em slave desconectado
             # (alvo do botão "Conectar Selecionados" da página).
             if self._show_select_btn and not is_connected:
-                self.select_btn = QPushButton(
-                    "Selecionado" if self._selected else "Selecionar"
-                )
+                self.select_btn = QPushButton("Selecionar")
                 self.select_btn.setCheckable(True)
-                self.select_btn.setChecked(self._selected)
                 self.select_btn.setStyleSheet(
                     "QPushButton { background-color: #45475a; color: #cdd6f4;"
                     " border: none; border-radius: 4px; padding: 4px 10px; }"
@@ -167,6 +164,12 @@ class BrokerCard(QFrame):
                     f"QPushButton:checked {{ background-color: {_COLOR_GREEN};"
                     " color: white; }"
                 )
+                # Trava a largura no rótulo mais longo ("Selecionar") para o
+                # botão não mudar de tamanho ao alternar para "Seleção".
+                self.select_btn.setFixedWidth(self.select_btn.sizeHint().width())
+                self.select_btn.setChecked(self._selected)
+                if self._selected:
+                    self.select_btn.setText("Seleção")
                 self.select_btn.toggled.connect(self._handle_select_toggled)
                 btn_row.addWidget(self.select_btn)
             if is_connected:
@@ -183,7 +186,7 @@ class BrokerCard(QFrame):
             layout.addLayout(btn_row)
 
     def _handle_select_toggled(self, checked):
-        self.select_btn.setText("Selecionado" if checked else "Selecionar")
+        self.select_btn.setText("Seleção" if checked else "Selecionar")
         if self._on_select_toggled:
             self._on_select_toggled(self.broker_key, checked)
 
