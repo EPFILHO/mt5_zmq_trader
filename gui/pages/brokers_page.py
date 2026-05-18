@@ -183,7 +183,7 @@ class BrokersPage(QWidget):
                 on_connect=lambda k=key: self._connect_broker(k),
                 on_disconnect=lambda k=key: self._disconnect_broker(k),
                 session_label=self.broker_manager.get_session_label(key),
-                show_select_checkbox=True,
+                show_select_btn=True,
                 selected=(key in self._selected_keys),
                 on_select_toggled=self._on_card_select_toggled,
                 parent=self,

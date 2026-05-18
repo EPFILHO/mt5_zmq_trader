@@ -22,7 +22,7 @@ Tipos de mudança:
 
 ### Changed
 - **Aba Histórico carrega ao abrir**: ao navegar para a aba Histórico o conteúdo é buscado automaticamente — não é mais necessário clicar "Atualizar" após iniciar o programa.
-- **Caixa de seleção do card mais visível**: o checkbox de "Conectar Selecionados" usava o estilo nativo (quadrado escuro sobre card escuro, quase invisível). Agora tem fundo branco com borda quando desmarcado e fica verde quando marcado.
+- **Seleção do card vira botão toggle "Selecionar"**: substituiu o checkbox (pouco visível e fora de contexto no topo do card) por um botão alternável ao lado de "Conectar" — fica cinza/"Selecionar" quando desligado e verde/"Selecionado" quando ligado. Aparece só em slaves desconectados.
 - **Nome da corretora limitado a 6 caracteres** no cadastro (`setMaxLength(6)`) — mantém o card e a chave do broker compactos.
 
 ## [0.3.1] — 2026-05-18

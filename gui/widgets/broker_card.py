@@ -4,7 +4,7 @@
 
 import logging
 from PySide6.QtWidgets import (
-    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
+    QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 )
 from PySide6.QtCore import Qt
 from gui import themes
@@ -20,7 +20,7 @@ _COLOR_GRAY = "#585b70"
 class BrokerCard(QFrame):
     def __init__(self, broker_key, broker_data, is_connected=False,
                  show_connect_btn=False, on_connect=None, on_disconnect=None,
-                 session_label=None, show_select_checkbox=False,
+                 session_label=None, show_select_btn=False,
                  selected=False, on_select_toggled=None, parent=None):
         super().__init__(parent)
         self.broker_key = broker_key
@@ -29,7 +29,7 @@ class BrokerCard(QFrame):
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self.session_label = session_label
-        self._show_select_checkbox = show_select_checkbox
+        self._show_select_btn = show_select_btn
         self._selected = selected
         self._on_select_toggled = on_select_toggled
 
@@ -54,27 +54,8 @@ class BrokerCard(QFrame):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(6)
 
-        # Row 1: Select checkbox + Session badge + Name + Role badge
+        # Row 1: Session badge + Name + Role badge
         top_row = QHBoxLayout()
-        if self._show_select_checkbox:
-            self.select_checkbox = QCheckBox()
-            self.select_checkbox.setChecked(self._selected)
-            self.select_checkbox.setToolTip("Marcar para 'Conectar Selecionados'")
-            self.select_checkbox.setStyleSheet(
-                "QCheckBox { background-color: transparent; }"
-                "QCheckBox::indicator {"
-                "  width: 16px; height: 16px;"
-                "  border: 2px solid #8a8d98; border-radius: 3px;"
-                "  background-color: #ffffff;"
-                "}"
-                "QCheckBox::indicator:hover { border-color: #2ecc71; }"
-                "QCheckBox::indicator:checked {"
-                f"  background-color: {_COLOR_GREEN};"
-                f"  border-color: {_COLOR_GREEN};"
-                "}"
-            )
-            self.select_checkbox.toggled.connect(self._handle_select_toggled)
-            top_row.addWidget(self.select_checkbox)
         if self.session_label:
             is_master = role == "master"
             badge_bg = "#ff8c00" if is_master else "#3478f6"
@@ -171,6 +152,23 @@ class BrokerCard(QFrame):
         if show_connect_btn:
             btn_row = QHBoxLayout()
             btn_row.addStretch()
+            # Toggle "Selecionar" — só faz sentido em slave desconectado
+            # (alvo do botão "Conectar Selecionados" da página).
+            if self._show_select_btn and not is_connected:
+                self.select_btn = QPushButton(
+                    "Selecionado" if self._selected else "Selecionar"
+                )
+                self.select_btn.setCheckable(True)
+                self.select_btn.setChecked(self._selected)
+                self.select_btn.setStyleSheet(
+                    "QPushButton { background-color: #45475a; color: #cdd6f4;"
+                    " border: none; border-radius: 4px; padding: 4px 10px; }"
+                    "QPushButton:hover { background-color: #585b70; }"
+                    f"QPushButton:checked {{ background-color: {_COLOR_GREEN};"
+                    " color: white; }"
+                )
+                self.select_btn.toggled.connect(self._handle_select_toggled)
+                btn_row.addWidget(self.select_btn)
             if is_connected:
                 btn = QPushButton("Desconectar")
                 btn.setProperty("class", "card-disconnect")
@@ -185,6 +183,7 @@ class BrokerCard(QFrame):
             layout.addLayout(btn_row)
 
     def _handle_select_toggled(self, checked):
+        self.select_btn.setText("Selecionado" if checked else "Selecionar")
         if self._on_select_toggled:
             self._on_select_toggled(self.broker_key, checked)
 
