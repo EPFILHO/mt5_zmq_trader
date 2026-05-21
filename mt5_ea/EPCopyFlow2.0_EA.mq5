@@ -767,6 +767,14 @@ void HandleSetMagicNumberCommand(const string request_id, JSONNode &payload)
    PrintFormat("Magic number configurado via Python: %lld (alien detection %s)",
                g_magic_number, g_magic_number > 0 ? "ATIVO" : "DESABILITADO");
 
+   // Catch-up do buffer de OnTrade: se trades ocorreram na janela
+   // REGISTER → SET_MAGIC_NUMBER, OnTrade retornou cedo sem emitir nada e o
+   // cache de posições continua no estado da inicialização. Dispara uma
+   // varredura agora — o diff identifica qualquer abertura/fechamento/modify
+   // que tenha ocorrido nesse intervalo e emite os eventos pendentes.
+   if(g_role == "MASTER" && g_is_connected && new_magic > 0)
+      OnTrade();
+
    response["status"] = "OK";
    response["magic_number"] = g_magic_number;
    SendJsonMessage(response, "Command");
@@ -1994,6 +2002,20 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
             PrintFormat("Async RESPONSE enviado: tcp_req=%s, retcode=%d, deal=%lld",
                         tcp_id, result.retcode, result.deal);
       }
+   }
+
+   // Bufferiza emissão de TRADE_EVENT até receber SET_MAGIC_NUMBER do Python.
+   // Trades que ocorrerem nessa janela (REGISTER → SET_MAGIC_NUMBER, geralmente
+   // ms) serão recuperados pelo snapshot diff do OnTrade na primeira execução
+   // após g_magic_number > 0 — o cache de posições ainda reflete o estado da
+   // inicialização (RefreshPositionCache em OnInit), então o diff identifica
+   // o trade como abertura nova. A resposta async acima já fluiu — necessária
+   // para não deixar Python esperando comando.
+   if(g_magic_number == 0)
+   {
+      if(InpDebugLog)
+         Print("TRADE_EVENT bufferizado: SET_MAGIC_NUMBER ainda não recebido");
+      return;
    }
 
    // Só envia para retcodes relevantes

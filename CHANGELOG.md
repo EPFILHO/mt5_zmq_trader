@@ -22,7 +22,11 @@ Tipos de mudança:
 
 ### Changed
 - **Aba Histórico carrega ao abrir**: ao navegar para a aba Histórico o conteúdo é buscado automaticamente — não é mais necessário clicar "Atualizar" após iniciar o programa.
-- **Seleção do card vira botão toggle "Selecionar"**: substituiu o checkbox (pouco visível e fora de contexto no topo do card) por um botão alternável ao lado de "Conectar" — fica cinza/"Selecionar" quando desligado e verde/"Selecionado" quando ligado. Aparece só em slaves desconectados.
+- **Seleção do card vira botão toggle "Selecionar"**: substituiu o checkbox (pouco visível e fora de contexto no topo do card) por um botão alternável ao lado de "Conectar" — fica cinza/"Selecionar" quando desligado e verde/"Seleção" quando ligado. Largura travada no rótulo "Selecionar" para não mudar de tamanho ao alternar. Aparece só em slaves desconectados.
+
+### Fixed
+- **EA: bufferiza `OnTradeTransaction` até receber `SET_MAGIC_NUMBER`**: havia janela de race entre o `REGISTER` do EA e a chegada do magic number — trades que ocorressem nesse intervalo (manualmente abertos no master, p.ex.) podiam ser emitidos com `magic=0` ou tratados como alien. Agora `OnTradeTransaction` retorna antes da emissão de `TRADE_EVENT` enquanto `g_magic_number == 0` (a resposta async para comandos pendentes ainda flui — não pendura Python). Quando o `SET_MAGIC_NUMBER` chega, dispara uma varredura `OnTrade` para detectar e emitir qualquer abertura/fechamento ocorrido na janela. **Requer recompilar o EA.**
+- **`ERROR ❌ TRADE_EVENT sem position_id` era falso alarme**: `OnTradeTransaction` emite um TRADE_EVENT secundário do deal de fechamento sem `position_id` (`request.position` vem 0 quando o broker processa o close de forma assíncrona — comportamento normal do MT5/B3). O snapshot diff do `OnTrade` já capturou o mesmo fechamento com `position_id` válido. Downgradado para `DEBUG` com mensagem clara ("eco pós-fechamento") em vez de `ERROR` enganoso.
 - **Nome da corretora limitado a 6 caracteres** no cadastro (`setMaxLength(6)`) — mantém o card e a chave do broker compactos.
 
 ## [0.3.1] — 2026-05-18

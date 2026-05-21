@@ -450,7 +450,14 @@ class CopyTradeManager(QObject):
 
         # Validar que temos position_id (obrigatório para tracking)
         if not position_id:
-            logger.error(f"  ❌ TRADE_EVENT sem position_id! EA pode estar desatualizado. deal={deal_ticket}")
+            # OnTradeTransaction pode emitir um TRADE_EVENT secundário do deal
+            # de fechamento sem position_id (request.position vem 0 quando o
+            # broker processa o close de forma assíncrona, ex.: B3). O snapshot
+            # diff do OnTrade já capturou o mesmo fechamento com position_id
+            # válido — silencia o eco em vez de logar como erro.
+            logger.debug(
+                f"  TRADE_EVENT sem position_id (provável eco pós-fechamento). deal={deal_ticket}"
+            )
             return
 
         # Dedup: OnTrade() e OnTradeTransaction() podem emitir para o mesmo trade.
